@@ -8,11 +8,12 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// 1. الاتصال بقاعدة البيانات
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ سيرفر بومة متصل بالسحابة!"))
+    .then(() => console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!"))
     .catch(err => console.error("❌ خطأ الاتصال:", err));
 
-// النماذج
+// --- النماذج (Schemas) ---
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' },
@@ -31,7 +32,7 @@ const auth = (req, res, next) => {
     jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).send('جلسة منتهية'); req.user = user; next(); });
 };
 
-// مسارات المصادقة
+// --- مسارات المصادقة ---
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
@@ -63,7 +64,7 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: user.balance, kycStatus: user.kycStatus } });
 });
 
-// --- مسارات إدارة المستخدمين والـ KYC (للوحة الإدارة) ---
+// === 🚨 المسارات التي كانت مفقودة (إدارة المستخدمين والـ KYC) 🚨 ===
 app.get('/api/users', async (req, res) => {
     try {
         const users = await User.find().select('-password -pin').sort({ _id: -1 });
@@ -77,8 +78,9 @@ app.put('/api/users/:id/kyc', async (req, res) => {
         res.json({ message: 'تم تحديث الـ KYC بنجاح', user });
     } catch (e) { res.status(500).json(e); }
 });
+// ====================================================================
 
-// المحفظة والمبيعات
+// --- المحفظة والمبيعات ---
 app.post('/api/wallet/checkout', auth, async (req, res) => {
     const { totalAmount, pin, cartItems } = req.body;
     const user = await User.findById(req.user._id);
@@ -106,9 +108,19 @@ app.post('/api/orders', async (req, res) => { try { await new Order(req.body).sa
 app.get('/api/orders', async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).send(e); } });
 app.put('/api/orders/:id/status', async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.send('OK'); } catch(e) { res.status(500).send(e); } });
 
-// الخدمات والمنتجات والبنرات
+// --- الخدمات والمنتجات والبنرات ---
 app.get('/api/products', async (req, res) => { res.json(await Product.find()); });
 app.post('/api/products', async (req, res) => { await new Product(req.body).save(); res.status(201).send('OK'); });
+app.delete('/api/products/:id', async (req, res) => { await Product.findByIdAndDelete(req.params.id); res.send('OK'); });
+
+app.post('/api/requests', async (req, res) => { await new ServiceRequest(req.body).save(); res.status(201).send('تم'); });
+app.get('/api/requests', async (req, res) => { res.json(await ServiceRequest.find().sort({date:-1})); });
+
+app.get('/api/banners', async (req, res) => { res.json(await Banner.find().sort({date:-1})); });
+app.post('/api/banners', async (req, res) => { await new Banner(req.body).save(); res.status(201).send('OK'); });
+app.delete('/api/banners/:id', async (req, res) => { await Banner.findByIdAndDelete(req.params.id); res.send('OK'); });
+
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Final Server Running"));
 app.delete('/api/products/:id', async (req, res) => { await Product.findByIdAndDelete(req.params.id); res.send('OK'); });
 
 app.post('/api/requests', async (req, res) => { await new ServiceRequest(req.body).save(); res.status(201).send('تم'); });
