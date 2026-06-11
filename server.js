@@ -5,12 +5,15 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const app = express();
+
+// زيادة سعة الاستقبال لضمان وصول صور الكاميرا (Base64) بدون أخطاء اتصال
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
+// الاتصال بقاعدة البيانات
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ سيرفر بومة v19.0 متصل بالسحابة!"))
+    .then(() => console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!"))
     .catch(err => console.error("❌ خطأ الاتصال:", err));
 
 // النماذج (Schemas)
@@ -21,15 +24,12 @@ const User = mongoose.model('User', new mongoose.Schema({
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 50 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 }
 }));
+
 const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String }));
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
-
-// النموذج الجديد: التنبيهات (Notifications)
-const Notification = mongoose.model('Notification', new mongoose.Schema({
-    clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }
-}));
+const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now } }));
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 const auth = (req, res, next) => {
@@ -41,7 +41,7 @@ const auth = (req, res, next) => {
     });
 };
 
-// --- مسارات المصادقة ---
+// --- المصادقة والتسجيل ---
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
@@ -63,8 +63,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         if (user.otpAttempts >= 3) return res.status(403).json({ message: 'محظور مؤقتاً' });
         if (user.otp === String(req.body.otp)) {
             user.isActive = true; user.otp = null; user.otpAttempts = 0; await user.save();
-            // تنبيه ترحيبي بمجرد التفعيل
-            await new Notification({ clientIdentity: user.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح، ومحفظتك جاهزة للاستخدام الآن.' }).save();
+            await new Notification({ clientIdentity: user.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح، ومحفظتك جاهزة.' }).save();
             res.json({ message: 'تم التفعيل بنجاح' });
         } else { user.otpAttempts += 1; await user.save(); res.status(400).json({ message: 'رمز خاطئ' }); }
     } catch (e) { res.status(500).json({ message: 'خطأ' }); }
@@ -79,36 +78,103 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
-// --- مسار جلب وتحديث التنبيهات للمستخدم ---
+// --- إدارة التوثيق والمستخدمين (KYC) ---
+app.get('/api/users', async (req, res) => {
+    try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } 
+    catch (e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.put('/api/users/:id/kyc', async (req, res) => {
+    try {
+        const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true });
+        const text = req.body.kycStatus === 'approved' ? 'تهانينا! تم قبول مستنداتك وتوثيق حسابك بالكامل. ✨' : 'تم رفض مستندات التوثيق، الرجاء المراجعة وإعادة الرفع.';
+        await new Notification({ clientIdentity: user.identity, title: 'تحديث حالة التوثيق 🛡️', message: text }).save();
+        res.json({ message: 'تم', user });
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage };
+        user.kycStatus = 'pending'; await user.save();
+        await new Notification({ clientIdentity: user.identity, title: 'المستندات قيد المراجعة ⏳', message: 'تم استلام المستندات وهي تحت المراجعة حالياً.' }).save();
+        res.json({ message: 'تم' });
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+// --- التنبيهات والعمليات المالية ---
 app.get('/api/notifications', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
-        const notes = await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 });
-        res.json(notes);
-    } catch (e) { res.status(500).json(e); }
+        res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 }));
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
 app.put('/api/notifications/read', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
         await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true });
-        res.json({ message: 'OK' });
-    } catch (e) { res.status(500).json(e); }
+        res.json({ message: 'تم' });
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
-// --- إدارة المستخدمين والـ KYC وتحديث حالته وتنبيه المستخدم تلقائياً ---
-app.get('/api/users', async (req, res) => {
-    try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json(e); }
-});
-
-app.put('/api/users/:id/kyc', async (req, res) => {
+app.post('/api/wallet/checkout', auth, async (req, res) => {
     try {
-        const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true });
-        // إرسال إشعار فوري تلقائي للعميل بتحديث الـ KYC
-        const text = req.body.kycStatus === 'approved' ? 'تهانينا! تم قبول مستنداتك وتوثيق حسابك بالكامل. ✨' : 'عذراً، تم رفض مستندات التوثيق. الرجاء مراجعة الإدارة وإعادة الرفع.';
-        await new Notification({ clientIdentity: user.identity, title: 'توثيق الحساب (KYC) 🛡️', message: text }).save();
-        res.json({ message: 'OK', user });
-    } catch (e) { res.status(500).json(e); }
+        const { totalAmount, pin, cartItems } = req.body;
+        const user = await User.findById(req.user._id);
+        if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' });
+        if (user.balance < totalAmount) return res.status(400).json({ message: 'رصيد غير كافٍ' });
+        user.balance -= totalAmount; await user.save();
+        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet' }).save();
+        await new Notification({ clientIdentity: user.identity, title: 'عملية شراء ناجحة 🛒', message: `تم خصم $${totalAmount.toFixed(2)} مقابل طلبات المتجر.` }).save();
+        res.json({ newBalance: user.balance });
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.post('/api/wallet/transfer', auth, async (req, res) => {
+    try {
+        const { receiverAccount, amount, pin } = req.body;
+        const sender = await User.findById(req.user._id);
+        const receiver = await User.findOne({ accountNumber: Number(receiverAccount) });
+        if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' });
+        if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' });
+        if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC' });
+        if (sender.balance < Number(amount)) return res.status(400).json({ message: 'رصيد غير كافٍ' });
+
+        sender.balance -= Number(amount); receiver.balance += Number(amount);
+        await sender.save(); await receiver.save();
+
+        await new Notification({ clientIdentity: sender.identity, title: 'حوالة صادرة 💸', message: `تم تحويل $${Number(amount).toFixed(2)} لحساب ${receiver.fullName}.` }).save();
+        await new Notification({ clientIdentity: receiver.identity, title: 'حوالة واردة 💰', message: `استلمت $${Number(amount).toFixed(2)} من ${sender.fullName}.` }).save();
+
+        res.json({ newBalance: sender.balance });
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+// --- مسارات التطبيق المتنوعة ---
+app.post('/api/orders', async (req, res) => { 
+    try { await new Order(req.body).save(); await new Notification({ clientIdentity: req.body.clientIdentity, title: 'طلب جديد 📦', message: `تم تسجيل طلبك بقيمة $${req.body.totalAmount}.` }).save(); res.status(201).json({ message: 'تم' }); } 
+    catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+app.get('/api/orders', async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/orders/:id/status', async (req, res) => {
+    try { const o = await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); const t = req.body.status === 'shipped' ? '🚚 تم الشحن' : '✅ تم التسليم'; await new Notification({ clientIdentity: o.clientIdentity, title: 'تحديث الشحن', message: t }).save(); res.json({ message: 'تم' }); } 
+    catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/products', async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/products/:id', async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.post('/api/requests', async (req, res) => { try{ await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/requests', async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/banners', async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/banners/:id', async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA API Server v20.0 Running"));
 });
 
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
