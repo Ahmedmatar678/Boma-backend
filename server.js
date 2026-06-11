@@ -8,107 +8,117 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// 1. الاتصال بقاعدة البيانات
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("✅ تم الاتصال بقاعدة بيانات بومة (BOMA) بنجاح!"))
+    .then(() => console.log("✅ سيرفر بومة متصل بالسحابة!"))
     .catch(err => console.error("❌ خطأ الاتصال:", err));
 
-// 2. النماذج (Schemas)
-const UserSchema = new mongoose.Schema({
+// النماذج
+const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
-    termsAccepted: { type: Boolean, required: true }, kycStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-    otpAttempts: { type: Number, default: 0 }, accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 50.00 },
-    isActive: { type: Boolean, default: false }, otp: String
-});
-const User = mongoose.model('User', UserSchema);
-
-const ProductSchema = new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String });
-const Product = mongoose.model('Product', ProductSchema);
-
-const RequestSchema = new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } });
-const ServiceRequest = mongoose.model('ServiceRequest', RequestSchema);
-
-const BannerSchema = new mongoose.Schema({ placement: { type: String, default: 'carousel' }, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } });
-const Banner = mongoose.model('Banner', BannerSchema);
-
-const OrderSchema = new mongoose.Schema({
-    clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String,
-    status: { type: String, enum: ['pending', 'shipped', 'delivered'], default: 'pending' }, date: { type: Date, default: Date.now }
-});
-const Order = mongoose.model('Order', OrderSchema);
+    termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' },
+    accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 50 },
+    isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 }
+}));
+const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String }));
+const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
+const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
+const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
-
-// Middleware الحماية
-const authenticateToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ message: 'غير مصرح لك بالوصول!' });
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ message: 'انتهت صلاحية الجلسة، يرجى تسجيل الدخول مجدداً.' });
-        req.user = user; next();
-    });
+const auth = (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).send('غير مصرح');
+    jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).send('جلسة منتهية'); req.user = user; next(); });
 };
 
-// --- مسارات المصادقة والأمان ---
+// مسارات المصادقة
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
-        if (!fullName || !identity || !password || !pin || !termsAccepted) return res.status(400).json({ message: 'الرجاء تعبئة جميع الحقول والموافقة على الشروط!' });
-        const existingUser = await User.findOne({ identity });
-        if (existingUser) return res.status(400).json({ message: 'هذا الحساب مسجل بالفعل!' });
+        if (await User.findOne({ identity })) return res.status(400).send('مسجل مسبقاً');
         const hashedPassword = await bcrypt.hash(password, 10);
         const hashedPin = await bcrypt.hash(pin, 10);
         const lastUser = await User.findOne().sort({ accountNumber: -1 });
         const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001;
-        const generatedOTP = Math.floor(1000 + Math.random() * 9000).toString();
-        const newUser = new User({ fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp: generatedOTP });
-        await newUser.save();
-        res.status(201).json({ message: 'تم إرسال الرمز بنجاح.', identity, otp: generatedOTP });
-    } catch (error) { res.status(500).json({ message: 'خطأ داخلي!' }); }
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        await new User({ fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp }).save();
+        res.status(201).json({ identity, otp });
+    } catch (e) { res.status(500).send('خطأ'); }
 });
 
 app.post('/api/auth/verify-otp', async (req, res) => {
-    try {
-        const { identity, otp } = req.body;
-        const user = await User.findOne({ identity });
-        if (!user) return res.status(404).json({ message: 'الحساب غير موجود!' });
-        if (user.otpAttempts >= 3) return res.status(403).json({ message: 'تم حظر الحساب مؤقتاً لتجاوز الحد الأقصى للمحاولات!' });
-        if (user.otp === String(otp)) {
-            user.isActive = true; user.otp = null; user.otpAttempts = 0; await user.save();
-            return res.json({ message: 'تم التفعيل بنجاح!' });
-        } else { 
-            user.otpAttempts += 1; await user.save();
-            return res.status(400).json({ message: `رمز غير صحيح! محاولات متبقية: ${3 - user.otpAttempts}` }); 
-        }
-    } catch (error) { res.status(500).json({ message: 'خطأ داخلي!' }); }
+    const user = await User.findOne({ identity: req.body.identity });
+    if (!user) return res.status(404).send('غير موجود');
+    if (user.otpAttempts >= 3) return res.status(403).send('محظور مؤقتاً');
+    if (user.otp === String(req.body.otp)) {
+        user.isActive = true; user.otp = null; user.otpAttempts = 0; await user.save();
+        res.send('تم');
+    } else { user.otpAttempts += 1; await user.save(); res.status(400).send('رمز خاطئ'); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { identity, password } = req.body;
-        const user = await User.findOne({ identity });
-        if (!user || !user.isActive) return res.status(400).json({ message: 'الحساب غير مفعل أو البيانات خاطئة!' });
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(400).json({ message: 'كلمة المرور خاطئة!' });
-        const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: user.balance, kycStatus: user.kycStatus } });
-    } catch (error) { res.status(500).json({ message: 'خطأ سيرفر!' }); }
+    const user = await User.findOne({ identity: req.body.identity });
+    if (!user || !user.isActive || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).send('بيانات خاطئة');
+    const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: user.balance, kycStatus: user.kycStatus } });
 });
 
-// --- مسارات العمليات والمبيعات ---
-app.post('/api/wallet/checkout', authenticateToken, async (req, res) => {
+// --- مسارات إدارة المستخدمين والـ KYC (للوحة الإدارة) ---
+app.get('/api/users', async (req, res) => {
     try {
-        const { totalAmount, pin, cartItems } = req.body;
-        const user = await User.findById(req.user._id);
-        const isPinMatch = await bcrypt.compare(pin, user.pin);
-        if (!isPinMatch) return res.status(403).json({ message: 'رمز الـ PIN المالي غير صحيح! العملية ملغاة.' });
-        if (user.balance < totalAmount) return res.status(400).json({ message: 'رصيدك غير كافٍ!' });
-        
-        user.balance -= totalAmount; await user.save();
-        const newOrder = new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet' });
-        await newOrder.save();
-        res.json({ newBalance: user.balance, message: 'تم الدفع وتسجيل الطلب بنجاح' });
+        const users = await User.find().select('-password -pin').sort({ _id: -1 });
+        res.json(users);
+    } catch (e) { res.status(500).json(e); }
+});
+
+app.put('/api/users/:id/kyc', async (req, res) => {
+    try {
+        const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true });
+        res.json({ message: 'تم تحديث الـ KYC بنجاح', user });
+    } catch (e) { res.status(500).json(e); }
+});
+
+// المحفظة والمبيعات
+app.post('/api/wallet/checkout', auth, async (req, res) => {
+    const { totalAmount, pin, cartItems } = req.body;
+    const user = await User.findById(req.user._id);
+    if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).send('PIN خاطئ');
+    if (user.balance < totalAmount) return res.status(400).send('رصيد غير كافٍ');
+    user.balance -= totalAmount; await user.save();
+    await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet', status: 'pending' }).save();
+    res.json({ newBalance: user.balance });
+});
+
+app.post('/api/wallet/transfer', auth, async (req, res) => {
+    const { receiverAccount, amount, pin } = req.body;
+    const sender = await User.findById(req.user._id);
+    const receiver = await User.findOne({ accountNumber: Number(receiverAccount) });
+    if (!receiver) return res.status(404).send('حساب غير موجود');
+    if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).send('PIN خاطئ');
+    if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).send('KYC مطلوب');
+    if (sender.balance < Number(amount)) return res.status(400).send('رصيد غير كافٍ');
+    sender.balance -= Number(amount); receiver.balance += Number(amount);
+    await sender.save(); await receiver.save();
+    res.json({ newBalance: sender.balance, message: 'تم التحويل' });
+});
+
+app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); res.status(201).send('تم الطلب'); } catch(e) { res.status(500).send(e); } });
+app.get('/api/orders', async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).send(e); } });
+app.put('/api/orders/:id/status', async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.send('OK'); } catch(e) { res.status(500).send(e); } });
+
+// الخدمات والمنتجات والبنرات
+app.get('/api/products', async (req, res) => { res.json(await Product.find()); });
+app.post('/api/products', async (req, res) => { await new Product(req.body).save(); res.status(201).send('OK'); });
+app.delete('/api/products/:id', async (req, res) => { await Product.findByIdAndDelete(req.params.id); res.send('OK'); });
+
+app.post('/api/requests', async (req, res) => { await new ServiceRequest(req.body).save(); res.status(201).send('تم'); });
+app.get('/api/requests', async (req, res) => { res.json(await ServiceRequest.find().sort({date:-1})); });
+
+app.get('/api/banners', async (req, res) => { res.json(await Banner.find()); });
+app.post('/api/banners', async (req, res) => { await new Banner(req.body).save(); res.status(201).send('OK'); });
+app.delete('/api/banners/:id', async (req, res) => { await Banner.findByIdAndDelete(req.params.id); res.send('OK'); });
+
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA v18.0 (With Admin KYC)"));
     } catch (error) { res.status(500).json({ message: 'خطأ مالي!' }); }
 });
 
