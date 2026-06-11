@@ -17,13 +17,17 @@ mongoose.connect(process.env.MONGO_URI)
 // 🚀 إعداد خادم البريد الاحترافي (SMTP)
 const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST || 'smtp-relay.brevo.com',
-    port: process.env.SMTP_PORT || 587,
-    secure: false, // Use TLS
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: false,
     auth: {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS
-    }
+    },
+    tls: { rejectUnauthorized: false }
 });
+
+// 🧠 الذاكرة المؤقتة لحفظ طلبات التسجيل قبل تفعيلها بالـ OTP (تمنع الحفظ المسبق في الـ DB)
+const temporarySignups = new Map();
 
 // --- النماذج (Schemas) ---
 const User = mongoose.model('User', new mongoose.Schema({
@@ -51,64 +55,165 @@ const auth = (req, res, next) => {
     });
 };
 
-// --- المصادقة والـ OTP الحقيقي ---
+// --- المصادقة والـ OTP المطور دون حفظ مسبق ---
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
-        if (await User.findOne({ identity })) return res.status(400).json({ message: 'مسجل مسبقاً' });
+        
+        // التأكد من عدم وجود حساب نشط ومفعل مسبقاً في قاعدة البيانات
+        const existingUser = await User.findOne({ identity });
+        if (existingUser && existingUser.isActive) {
+            return res.status(400).json({ message: 'هذا الحساب مسجل ومفعل مسبقاً' });
+        }
+
         const hashedPassword = await bcrypt.hash(password, 10);
         const hashedPin = await bcrypt.hash(pin, 10);
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        const isEmail = identity.includes('@');
+
+        // حساب رقم الحساب البنكي الافتراضي المتسلسل
         const lastUser = await User.findOne().sort({ accountNumber: -1 });
         const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001;
-        const otp = Math.floor(1000 + Math.random() * 9000).toString();
-        
-        await new User({ fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp }).save();
-        
-        // 🚀 إرسال الـ OTP للبريد باستخدام الـ SMTP الجديد
-        if (identity.includes('@') && process.env.SMTP_USER) {
-            await transporter.sendMail({
-                from: `"BOMA Pay" <${process.env.EMAIL_FROM || process.env.SMTP_USER}>`,
-                to: identity,
-                subject: 'رمز تفعيل حسابك - BOMA',
-                html: `<div style="text-align:center; font-family:sans-serif; padding:20px; background:#f8fafc; border-radius:10px;">
-                        <h2 style="color:#1e3d59;">مرحباً بك في بومة 🦉</h2>
-                        <p>رمز التفعيل الخاص بك هو:</p>
-                        <h1 style="color:#ff6e40; letter-spacing:5px; background:#fff; padding:10px; border-radius:8px; display:inline-block;">${otp}</h1>
-                        <p style="color:#64748b; font-size:12px; margin-top:20px;">لا تشارك هذا الرمز مع أحد.</p>
-                       </div>`
-            });
+
+        // 🧠 تم إلغاء الحفظ في الـ DB.. نحفظ البيانات مؤقتاً في الذاكرة لحين التحقق
+        temporarySignups.set(identity, {
+            fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp
+        });
+
+        // إرسال الـ OTP الحقيقي للبريد الإلكتروني باستخدام المُرسل الموثق
+        if (isEmail && process.env.SMTP_USER) {
+            try {
+                await transporter.sendMail({
+                    from: `"BOMA Pay" <${process.env.SMTP_USER}>`, // إجبار المرسل على مطابقة حساب بريفو لضمان التسليم
+                    to: identity,
+                    subject: 'رمز تفعيل حسابك - BOMA',
+                    html: `<div style="text-align:center; font-family:sans-serif; padding:20px; background:#f8fafc; border-radius:10px;">
+                            <h2 style="color:#1e3d59;">مرحباً بك في بومة 🦉</h2>
+                            <p>رمز التفعيل الخاص بك هو:</p>
+                            <h1 style="color:#ff6e40; letter-spacing:5px; background:#fff; padding:10px; border-radius:8px; display:inline-block;">${otp}</h1>
+                            <p style="color:#64748b; font-size:12px; margin-top:20px;">لا تشارك هذا الرمز مع أحد.</p>
+                           </div>`
+                });
+            } catch (mailErr) {
+                console.error("Mail Error:", mailErr.message);
+            }
         }
-        res.status(201).json({ identity }); 
-    } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); }
+        
+        // نرسل تفاصيل البانر للواجهة لطباعة الكود فوراً
+        return res.status(201).json({ identity, isEmail, fallbackOtp: isEmail ? null : otp }); 
+    } catch (e) { return res.status(500).json({ message: 'خطأ داخلي في الخادم' }); }
 });
 
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
-        const user = await User.findOne({ identity: req.body.identity });
-        if (!user) return res.status(404).json({ message: 'غير موجود' });
-        if (user.otpAttempts >= 3) return res.status(403).json({ message: 'محظور مؤقتاً' });
-        
-        if (user.otp === String(req.body.otp)) {
-            if (req.body.purpose === 'forgot') {
-                return res.json({ message: 'رمز صحيح' }); 
-            } else {
-                user.isActive = true; user.otp = null; user.otpAttempts = 0; await user.save();
-                await new Notification({ clientIdentity: user.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح، ومحفظتك جاهزة.' }).save();
+        const { identity, otp, purpose } = req.body;
+
+        if (purpose === 'forgot') {
+            const user = await User.findOne({ identity });
+            if (!user) return res.status(404).json({ message: 'غير موجود' });
+            if (user.otp === String(otp)) return res.json({ message: 'رمز صحيح' });
+            return res.status(400).json({ message: 'رمز خاطئ' });
+        } else {
+            // التحقق من الحساب الجديد المتواجد في الذاكرة المؤقتة
+            const tempData = temporarySignups.get(identity);
+            if (!tempData) return res.status(400).json({ message: 'انتهت صلاحية الرمز أو لم يتم تسجيل البيانات، أعد التسجيل' });
+
+            if (tempData.otp === String(otp)) {
+                // الرمز صحيح! الآن نقوم بإنشاء الحساب الفعلي في قاعدة البيانات لأول مرة وتفعيله
+                const newUser = new User({
+                    fullName: tempData.fullName, identity: tempData.identity, password: tempData.password,
+                    pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber,
+                    balance: 50, isActive: true
+                });
+                await newUser.save();
+
+                await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح، ومحفظتك جاهزة.' }).save();
+                
+                // مسح البيانات المؤقتة لعدم استهلاك الذاكرة
+                temporarySignups.delete(identity);
                 return res.json({ message: 'تم التفعيل بنجاح' });
+            } else {
+                return res.status(400).json({ message: 'رمز الـ OTP خاطئ' });
             }
-        } else { 
-            user.otpAttempts += 1; await user.save(); 
-            return res.status(400).json({ message: 'رمز خاطئ' }); 
         }
-    } catch (e) { res.status(500).json({ message: 'خطأ' }); }
+    } catch (e) { return res.status(500).json({ message: 'خطأ أثناء التحقق' }); }
 });
 
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const user = await User.findOne({ identity: req.body.identity });
-        if(!user) return res.status(404).json({message: 'الحساب غير موجود'});
+        if(!user || !user.isActive) return res.status(404).json({message: 'الحساب غير موجود أو غير مفعل'});
         
         const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        user.otp = otp; user.otpAttempts = 0; await user.save();
+        const isEmail = user.identity.includes('@');
+        
+        if (isEmail && process.env.SMTP_USER) {
+            try {
+                await transporter.sendMail({
+                    from: `"BOMA Support" <${process.env.SMTP_USER}>`,
+                    to: user.identity,
+                    subject: 'استعادة كلمة المرور - BOMA',
+                    html: `<div style="text-align:center; font-family:sans-serif; padding:20px; background:#f8fafc; border-radius:10px;">
+                            <h2 style="color:#1e3d59;">إعادة تعيين كلمة المرور 🔒</h2>
+                            <p>طلب استعادة حسابك. رمز التحقق هو:</p>
+                            <h1 style="color:#ff6e40; letter-spacing:5px; background:#fff; padding:10px; border-radius:8px; display:inline-block;">${otp}</h1>
+                           </div>`
+                });
+            } catch(e) {}
+        }
+        return res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: isEmail ? null : otp });
+    } catch(e) { return res.status(500).json({message: 'خطأ داخلي'}); }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+        const { identity, otp, newPassword } = req.body;
+        const user = await User.findOne({ identity, otp });
+        if(!user) return res.status(400).json({message: 'رمز التحقق غير صالح أو منتهي'});
+        
+        user.password = await bcrypt.hash(newPassword, 10);
+        user.otp = null; await user.save();
+        return res.json({message: 'تم تحديث كلمة المرور بنجاح'});
+    } catch(e) { return res.status(500).json({message: 'خطأ'}); }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const user = await User.findOne({ identity: req.body.identity });
+        if (!user || !user.isActive || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).json({ message: 'بيانات خاطئة' });
+        const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber }, JWT_SECRET, { expiresIn: '24h' });
+        return res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: user.balance, kycStatus: user.kycStatus } });
+    } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
+});
+
+// --- بقية المسارات الإدارية والمالية الثابتة دون تغيير ---
+app.post('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/admin/support', async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/admin/support/:id', async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد من الدعم الفني 🎧', message: `تم الرد على تذكرتك. يرجى مراجعة قسم الدعم.` }).save(); res.json({ message: 'تم', ticket }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/users', async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/users/:id/kyc', async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); const text = req.body.kycStatus === 'approved' ? 'تهانينا! تم قبول مستنداتك وتوثيق حسابك. ✨' : 'تم رفض مستندات التوثيق، يرجى إعادة الرفع.'; await new Notification({ clientIdentity: user.identity, title: 'تحديث حالة التوثيق 🛡️', message: text }).save(); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); await new Notification({ clientIdentity: user.identity, title: 'المستندات قيد المراجعة ⏳', message: 'تم استلام المستندات وهي تحت المراجعة.' }).save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/transactions', async (req, res) => { try { res.json(await Transaction.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/wallet/checkout', auth, async (req, res) => { try { const { totalAmount, pin, cartItems } = req.body; const user = await User.findById(req.user._id); if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); if (user.balance < totalAmount) return res.status(400).json({ message: 'رصيد غير كافٍ' }); user.balance -= totalAmount; await user.save(); await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet' }).save(); await new Notification({ clientIdentity: user.identity, title: 'عملية شراء ناجحة 🛒', message: `تم خصم $${totalAmount.toFixed(2)} مقابل طلبات المتجر.` }).save(); await new Transaction({ clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء منتجات من المتجر' }).save(); res.json({ newBalance: user.balance }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/wallet/transfer', auth, async (req, res) => { try { const { receiverAccount, amount, pin } = req.body; const sender = await User.findById(req.user._id); const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC' }); if (sender.balance < Number(amount)) return res.status(400).json({ message: 'رصيد غير كافٍ' }); sender.balance -= Number(amount); receiver.balance += Number(amount); await sender.save(); await receiver.save(); await new Notification({ clientIdentity: sender.identity, title: 'حوالة صادرة 💸', message: `تم تحويل $${Number(amount).toFixed(2)} لحساب ${receiver.fullName}.` }).save(); await new Notification({ clientIdentity: receiver.identity, title: 'حوالة واردة 💰', message: `استلمت $${Number(amount).toFixed(2)} من ${sender.fullName}.` }).save(); await new Transaction({ clientIdentity: sender.identity, type: 'out', amount: Number(amount), title: `حوالة إلى (${receiver.fullName})` }).save(); await new Transaction({ clientIdentity: receiver.identity, type: 'in', amount: Number(amount), title: `حوالة من (${sender.fullName})` }).save(); res.json({ newBalance: sender.balance }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); await new Notification({ clientIdentity: req.body.clientIdentity, title: 'طلب جديد 📦', message: `تم تسجيل طلبك بقيمة $${req.body.totalAmount}.` }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/orders', async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/orders/:id/status', async (req, res) => { try { const o = await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); const t = req.body.status === 'shipped' ? '🚚 تم الشحن' : '✅ تم التسليم'; await new Notification({ clientIdentity: o.clientIdentity, title: 'تحديث الشحن', message: t }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/products', async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/products/:id', async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/requests', async (req, res) => { try{ await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/requests', async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/banners', async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/banners/:id', async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Server Running on Level 26.0"));
         user.otp = otp; user.otpAttempts = 0; await user.save();
         
         if (user.identity.includes('@') && process.env.SMTP_USER) {
