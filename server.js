@@ -5,11 +5,13 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 
 const app = express();
-// زيادة مساحة الاستقبال لضمان وصول الصور المرفوعة (Base64)
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// 🚀 هذا هو السطر السحري الذي تم تصحيحه للسماح باستقبال الصور!
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 
+// 1. الاتصال بقاعدة البيانات
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!"))
     .catch(err => console.error("❌ خطأ الاتصال:", err));
@@ -18,12 +20,10 @@ mongoose.connect(process.env.MONGO_URI)
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' },
-    // إضافة حقل مستندات التوثيق
-    kycDocs: { docType: String, docImage: String, selfieImage: String },
+    kycDocs: { type: Object, default: {} }, // 🚀 تعديل لضمان حفظ الصور بأمان
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 50 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 }
 }));
-
 const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String }));
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
@@ -93,7 +93,6 @@ app.put('/api/users/:id/kyc', async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ تحديث' }); }
 });
 
-// === المسار الجديد: رفع مستندات التوثيق من التطبيق ===
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
     try {
         const { docType, docImage, selfieImage } = req.body;
@@ -102,9 +101,8 @@ app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
         user.kycStatus = 'pending';
         await user.save();
         res.json({ message: 'تم استلام مستنداتك بنجاح، جاري المراجعة.' });
-    } catch (e) { res.status(500).json({ message: 'خطأ في رفع المستندات' }); }
+    } catch (e) { res.status(500).json({ message: 'خطأ في حفظ المستندات' }); }
 });
-// =======================================================
 
 // --- المحفظة والمبيعات ---
 app.post('/api/wallet/checkout', auth, async (req, res) => {
@@ -126,31 +124,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         const receiver = await User.findOne({ accountNumber: Number(receiverAccount) });
         if (!receiver) return res.status(404).json({ message: 'حساب المستلم غير موجود' });
         if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' });
-        if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'KYC مطلوب للتحويلات الكبيرة' });
-        if (sender.balance < Number(amount)) return res.status(400).json({ message: 'رصيد غير كافٍ' });
-        sender.balance -= Number(amount); receiver.balance += Number(amount);
-        await sender.save(); await receiver.save();
-        res.json({ newBalance: sender.balance, message: 'تم التحويل' });
-    } catch (e) { res.status(500).json({ message: 'خطأ مالي' }); }
-});
-
-app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); res.status(201).json({ message: 'تم الطلب' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/orders', async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/orders/:id/status', async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'OK' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
-// --- المنتجات والخدمات واللوحات ---
-app.get('/api/products', async (req, res) => { res.json(await Product.find()); });
-app.post('/api/products', async (req, res) => { await new Product(req.body).save(); res.status(201).json({ message: 'OK' }); });
-app.delete('/api/products/:id', async (req, res) => { await Product.findByIdAndDelete(req.params.id); res.json({ message: 'OK' }); });
-
-app.post('/api/requests', async (req, res) => { await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); });
-app.get('/api/requests', async (req, res) => { res.json(await ServiceRequest.find().sort({date:-1})); });
-
-app.get('/api/banners', async (req, res) => { res.json(await Banner.find().sort({date:-1})); });
-app.post('/api/banners', async (req, res) => { await new Banner(req.body).save(); res.status(201).json({ message: 'OK' }); });
-app.delete('/api/banners/:id', async (req, res) => { await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'OK' }); });
-
-app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Server v18.0 (With Full KYC) Running"));
         if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'KYC مطلوب' });
         if (sender.balance < Number(amount)) return res.status(400).json({ message: 'رصيد غير كافٍ' });
         sender.balance -= Number(amount); receiver.balance += Number(amount);
@@ -175,4 +148,4 @@ app.get('/api/banners', async (req, res) => { res.json(await Banner.find().sort(
 app.post('/api/banners', async (req, res) => { await new Banner(req.body).save(); res.status(201).json({ message: 'OK' }); });
 app.delete('/api/banners/:id', async (req, res) => { await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'OK' }); });
 
-app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Final Server Running"));
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Server v18.1 Running"));
