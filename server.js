@@ -47,6 +47,7 @@ const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: Stri
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
+
 const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({
     clientIdentity: String, type: { type: String, enum: ['deposit', 'withdraw'] },
     amount: Number, currency: { type: String, default: 'SDG' },
@@ -128,8 +129,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const user = await User.findOne({ identity: req.body.identity });
         if(!user || !user.isActive) return res.status(404).json({message: 'الحساب غير موجود أو غير مفعل'});
+        
         const otp = Math.floor(1000 + Math.random() * 9000).toString();
         user.otp = otp; user.otpAttempts = 0; await user.save();
+        
         const isEmail = user.identity.includes('@');
         if (isEmail && process.env.SMTP_USER) {
             try { transporter.sendMail({ from: `"BOMA Support" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة كلمة المرور', html: `<h1>${otp}</h1>` }); } catch(e) {}
@@ -165,7 +168,6 @@ app.get('/api/support', auth, async (req, res) => { try { const user = await Use
 // ==========================================
 // --- مسارات الإدارة ---
 // ==========================================
-
 app.get('/api/admin/stats', adminAuth, async (req, res) => {
     try {
         const usersCount = await User.countDocuments() || 0;
@@ -254,14 +256,13 @@ app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => {
 
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// === مسارات المنتجات والإعلانات ===
 app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -290,8 +291,10 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         const amount = Number(req.body.amount);
         const availableBalance = user.balance - user.frozenBalance;
         if (availableBalance < amount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
+        
         user.balance -= amount; 
         await user.save();
+
         await new FinanceRequest({ clientIdentity: user.identity, type: 'withdraw', amount, bankDetails: req.body.bankDetails }).save(); 
         await new Transaction({ clientIdentity: user.identity, type: 'out', amount, title: 'طلب سحب أرباح (قيد المراجعة)' }).save(); 
         res.json({ newBalance: user.balance - user.frozenBalance }); 
@@ -303,9 +306,10 @@ app.get('/api/notifications', auth, async (req, res) => { try { const user = awa
 app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
+// --- تعديل مسار الدفع لربط بيانات التوصيل ---
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
-        const { totalAmount, pin, cartItems } = req.body; 
+        const { totalAmount, pin, cartItems, deliveryDetails } = req.body; 
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
         if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
@@ -313,7 +317,10 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         if (availableBalance < totalAmount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
         user.balance -= totalAmount; 
         await user.save(); 
-        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet' }).save(); 
+        
+        // دمج بيانات التوصيل مع المحفظة
+        const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون بيانات توصيل');
+        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: finalMethod }).save(); 
         await new Transaction({ clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء منتجات من المتجر' }).save(); 
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
@@ -338,6 +345,8 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         res.json({ newBalance: sender.balance - sender.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
+
+app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
