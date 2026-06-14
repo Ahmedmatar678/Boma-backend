@@ -88,7 +88,6 @@ app.post('/api/auth/signup', async (req, res) => {
         const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001;
 
         temporarySignups.set(identity, { fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp });
-
         setTimeout(() => { if (temporarySignups.has(identity)) temporarySignups.delete(identity); }, 10 * 60 * 1000);
 
         if (isEmail && process.env.SMTP_USER) {
@@ -109,6 +108,250 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         } else {
             const tempData = temporarySignups.get(identity);
             if (!tempData) return res.status(400).json({ message: 'انتهت صلاحية الرمز' });
+
+            if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
+                const newUser = new User({
+                    fullName: tempData.fullName, identity: tempData.identity, password: tempData.password,
+                    pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber,
+                    balance: 0, isActive: true
+                });
+                await newUser.save();
+                await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح.' }).save();
+                temporarySignups.delete(identity);
+                return res.json({ message: 'تم التفعيل بنجاح' });
+            } else { return res.status(400).json({ message: 'رمز الـ OTP خاطئ' }); }
+        }
+    } catch (e) { return res.status(500).json({ message: 'خطأ أثناء التحقق' }); }
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+        const user = await User.findOne({ identity: req.body.identity });
+        if(!user || !user.isActive) return res.status(404).json({message: 'الحساب غير موجود أو غير مفعل'});
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        user.otp = otp; user.otpAttempts = 0; await user.save();
+        
+        const isEmail = user.identity.includes('@');
+        if (isEmail && process.env.SMTP_USER) {
+            try { transporter.sendMail({ from: `"BOMA Support" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة كلمة المرور', html: `<h1>${otp}</h1>` }); } catch(e) {}
+        }
+        return res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: isEmail ? null : otp });
+    } catch(e) { return res.status(500).json({message: 'خطأ داخلي'}); }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+        const { identity, otp, newPassword } = req.body;
+        const user = await User.findOne({ identity });
+        if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'});
+        user.password = await bcrypt.hash(newPassword, 10);
+        user.otp = null; await user.save();
+        return res.json({message: 'تم تحديث كلمة المرور بنجاح'});
+    } catch(e) { return res.status(500).json({message: 'خطأ'}); }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const user = await User.findOne({ identity: req.body.identity });
+        if (!user || !user.isActive || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).json({ message: 'بيانات خاطئة' });
+        if (user.isSuspended) return res.status(403).json({ message: 'هذا الحساب موقوف مؤقتاً من قبل الإدارة' }); 
+        const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber }, JWT_SECRET, { expiresIn: '24h' });
+        return res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: (user.balance - user.frozenBalance), kycStatus: user.kycStatus } });
+    } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.post('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// ==========================================
+// --- مسارات الإدارة (المحمية) ---
+// ==========================================
+
+// الإحصائيات (مصممة للعمل حتى لو كان هناك بيانات قديمة تالفة)
+app.get('/api/admin/stats', adminAuth, async (req, res) => {
+    try {
+        const usersCount = await User.countDocuments() || 0;
+        const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0;
+        
+        const users = await User.find() || [];
+        const totalSDG = users.reduce((sum, u) => sum + (Number(u.balance) || 0), 0);
+        
+        const approvedDeposits = await FinanceRequest.find({ type: 'deposit', status: 'approved' }) || [];
+        const totalUSD = approvedDeposits.reduce((sum, d) => sum + (Number(d.amount) || 0), 0); 
+        
+        res.json({ usersCount, totalUSD, totalSDG, pendingOrders });
+    } catch (e) { 
+        console.error('Stats Error:', e); 
+        res.status(500).json({ message: 'خطأ في جلب الإحصائيات' }); 
+    }
+});
+
+// المسار الوحيد والصحيح لكشف حساب العميل للإدارة
+app.post('/api/admin/user-transactions', adminAuth, async (req, res) => {
+    try {
+        const { identity } = req.body;
+        const txs = await Transaction.find({ clientIdentity: identity }).sort({ date: -1 });
+        res.json(txs);
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ في جلب كشف الحساب' });
+    }
+});
+
+app.get('/api/admin/finance', adminAuth, async (req, res) => {
+    try {
+        const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 });
+        const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 });
+        res.json({ deposits, withdraws });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.put('/api/admin/:type/:id', adminAuth, async (req, res) => {
+    try {
+        const { type, id } = req.params; 
+        const requestType = type === 'deposits' ? 'deposit' : 'withdraw';
+        const { status } = req.body;
+        
+        const request = await FinanceRequest.findById(id);
+        if (!request || request.status !== 'pending') return res.status(400).json({ message: 'طلب غير صالح أو معالج مسبقاً' });
+        
+        request.status = status;
+        await request.save();
+
+        const user = await User.findOne({ identity: request.clientIdentity });
+        if (user) {
+            if (requestType === 'deposit' && status === 'approved') {
+                user.balance += request.amount;
+                await new Transaction({ clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'شحن المحفظة (إيداع معتمد)' }).save();
+                await new Notification({ clientIdentity: user.identity, title: 'شحن المحفظة', message: `تمت الموافقة على إيداعك وإضافة ${request.amount} SDG لحسابك.` }).save();
+            } 
+            else if (requestType === 'withdraw' && status === 'rejected') {
+                user.balance += request.amount;
+                await new Transaction({ clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'استرداد (سحب مرفوض)' }).save();
+                await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم رفض طلب السحب وإرجاع ${request.amount} SDG لحسابك.` }).save();
+            }
+            else if (requestType === 'withdraw' && status === 'approved') {
+                await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} SDG إلى حسابك البنكي بنجاح.` }).save();
+            }
+            await user.save();
+        }
+        res.json({ message: 'تم التحديث بنجاح' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.post('/api/admin/users/cleanup', adminAuth, async (req, res) => {
+    try {
+        let adminUser = await User.findOne({ fullName: /أحمد إبراهيم|احمد ابراهيم/i });
+        if (!adminUser) adminUser = await User.findOne().sort({ _id: 1 }); 
+        if (!adminUser) return res.status(404).json({ message: 'لا توجد حسابات' });
+        const result = await User.deleteMany({ _id: { $ne: adminUser._id } });
+        res.json({ message: 'تم التنظيف', keptAccount: adminUser.fullName, deletedCount: result.deletedCount });
+    } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); }
+});
+
+app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => {
+    try {
+        const { isSuspended, frozenBalance } = req.body;
+        const user = await User.findByIdAndUpdate(req.params.id, { isSuspended, frozenBalance: Number(frozenBalance) || 0 }, { new: true });
+        res.json({ message: 'تم التحديث', user });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// المبيعات والطلبات
+app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// المنتجات
+app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+// المسار الذي كان مفقوداً لتعديل المنتجات!
+app.put('/api/admin/products/:id', adminAuth, async (req, res) => {
+    try {
+        await Product.findByIdAndUpdate(req.params.id, req.body);
+        res.json({ message: 'تم التحديث بنجاح' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+// ==========================================
+// --- مسارات المحفظة للمستخدمين ---
+// ==========================================
+app.post('/api/wallet/deposit', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: req.body.amount, receipt: req.body.receipt }).save(); 
+        res.status(201).json({ message: 'تم إرسال الطلب' }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.post('/api/wallet/withdraw', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        if (!(await bcrypt.compare(req.body.pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        const amount = Number(req.body.amount);
+        const availableBalance = user.balance - user.frozenBalance;
+        if (availableBalance < amount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
+        
+        user.balance -= amount; 
+        await user.save();
+
+        await new FinanceRequest({ clientIdentity: user.identity, type: 'withdraw', amount, bankDetails: req.body.bankDetails }).save(); 
+        await new Transaction({ clientIdentity: user.identity, type: 'out', amount, title: 'طلب سحب أرباح (قيد المراجعة)' }).save(); 
+        res.json({ newBalance: user.balance - user.frozenBalance }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+app.post('/api/wallet/checkout', auth, async (req, res) => { 
+    try { 
+        const { totalAmount, pin, cartItems } = req.body; 
+        const user = await User.findById(req.user._id); 
+        if (user.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
+        if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        const availableBalance = user.balance - user.frozenBalance;
+        if (availableBalance < totalAmount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
+        user.balance -= totalAmount; 
+        await user.save(); 
+        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: 'BOMA Wallet' }).save(); 
+        await new Transaction({ clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء منتجات من المتجر' }).save(); 
+        res.json({ newBalance: user.balance - user.frozenBalance }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.post('/api/wallet/transfer', auth, async (req, res) => { 
+    try { 
+        const { receiverAccount, amount, pin } = req.body; 
+        const sender = await User.findById(req.user._id); 
+        if (sender.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
+        const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
+        if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
+        if (receiver.isSuspended) return res.status(403).json({ message: 'حساب المستلم موقوف' });
+        if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC' }); 
+        const availableBalance = sender.balance - sender.frozenBalance;
+        if (availableBalance < Number(amount)) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
+        sender.balance -= Number(amount); receiver.balance += Number(amount); 
+        await sender.save(); await receiver.save(); 
+        await new Transaction({ clientIdentity: sender.identity, type: 'out', amount: Number(amount), title: `حوالة إلى (${receiver.fullName})` }).save(); 
+        await new Transaction({ clientIdentity: receiver.identity, type: 'in', amount: Number(amount), title: `حوالة من (${sender.fullName})` }).save(); 
+        res.json({ newBalance: sender.balance - sender.frozenBalance }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.listen(process.env.PORT || 5000, () => console.log("🚀 BOMA Server Clean & Secure Running"));
 
             if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
                 const newUser = new User({
