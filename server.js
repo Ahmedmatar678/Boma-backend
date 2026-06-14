@@ -47,7 +47,6 @@ const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: Stri
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
-
 const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({
     clientIdentity: String, type: { type: String, enum: ['deposit', 'withdraw'] },
     amount: Number, currency: { type: String, default: 'SDG' },
@@ -171,21 +170,24 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
     try {
         const usersCount = await User.countDocuments() || 0;
         const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0;
+        
         const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]);
         const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0;
-        const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]);
+        
+        const depositAggr = await FinanceRequest.aggregate([
+            { $match: { type: 'deposit', status: 'approved' } },
+            { $group: { _id: null, totalUSD: { $sum: "$amount" } } }
+        ]);
         const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; 
+        
         res.json({ usersCount, totalUSD, totalSDG, pendingOrders });
     } catch (e) { res.status(500).json({ message: 'خطأ في جلب الإحصائيات' }); }
 });
 
-// المسار الحامي لكشف الحساب
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => {
     try {
         const { identity } = req.body;
-        // شرط الأمان: إذا لم يتم إرسال هوية، أرسل قائمة فارغة ولا ترسل كل الحركات
         if (!identity) return res.json([]); 
-        
         const txs = await Transaction.find({ clientIdentity: identity }).sort({ date: -1 });
         res.json(txs);
     } catch (e) { res.status(500).json({ message: 'خطأ في جلب كشف الحساب' }); }
@@ -252,7 +254,6 @@ app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => {
 
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
@@ -260,13 +261,16 @@ app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Ord
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
+// === مسارات المنتجات والإعلانات ===
+app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
 // --- مسارات المحفظة للمستخدمين ---
@@ -278,6 +282,7 @@ app.post('/api/wallet/deposit', auth, async (req, res) => {
         res.status(201).json({ message: 'تم إرسال الطلب' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
+
 app.post('/api/wallet/withdraw', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
@@ -292,6 +297,7 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
+
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
