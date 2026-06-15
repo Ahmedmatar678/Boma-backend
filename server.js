@@ -33,46 +33,14 @@ const MASTER_OTP = "1111";
 // ==========================================
 // --- إعدادات الإدارة والحدود اليومية ---
 // ==========================================
-const DAILY_WITHDRAW_LIMIT = 500000;  // 500 ألف حد السحب والتحويل
-const DAILY_DEPOSIT_LIMIT = 1000000;  // مليون حد الإيداع والاستقبال
+const DAILY_WITHDRAW_LIMIT = 500000;  
+const DAILY_DEPOSIT_LIMIT = 1000000;  
 
-// دالة محصنة للتعرف على حساب الإدارة
+// دالة صارمة للتعرف على حساب الإدارة وإعطائه صلاحيات مطلقة
 function isAdminAccount(user) {
-    if (!user) return false;
-    const identity = (user.identity || "").toLowerCase().trim();
-    const fullName = (user.fullName || "").toLowerCase().trim();
-    const admins = ["infoboma0@gmail.com", "ahmedwadmatar1996@gmail.com", "شركة بومة المحدودة", "شركة بومة"];
-    return admins.some(a => identity.includes(a) || fullName.includes(a));
-}
-
-function getTodayStr() {
-    return new Date().toISOString().split('T')[0];
-}
-
-async function checkAndApplyLimits(user, type, amount) {
-    if (isAdminAccount(user)) return { ok: true };
-    
-    const today = getTodayStr();
-    if (user.lastTxDate !== today) {
-        user.dailyOut = 0;
-        user.dailyIn = 0;
-        user.lastTxDate = today;
-    }
-
-    if (type === 'out') {
-        if (user.dailyOut + amount > DAILY_WITHDRAW_LIMIT) {
-            const rem = Math.max(0, DAILY_WITHDRAW_LIMIT - user.dailyOut);
-            return { ok: false, msg: `تجاوزت الحد اليومي للسحب/التحويل. المتبقي لك: ${rem} SDG` };
-        }
-        user.dailyOut += amount;
-    } else {
-        if (user.dailyIn + amount > DAILY_DEPOSIT_LIMIT) {
-            const rem = Math.max(0, DAILY_DEPOSIT_LIMIT - user.dailyIn);
-            return { ok: false, msg: `تجاوزت الحد اليومي للإيداع/الاستقبال. المتبقي لك: ${rem} SDG` };
-        }
-        user.dailyIn += amount;
-    }
-    return { ok: true };
+    if (!user || !user.identity) return false;
+    const ident = String(user.identity).toLowerCase().trim();
+    return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com';
 }
 
 // --- النماذج (Schemas) ---
@@ -82,10 +50,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     kycDocs: { type: Object, default: {} },
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
-    isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 },
-    lastTxDate: { type: String, default: '' },
-    dailyOut: { type: Number, default: 0 },
-    dailyIn: { type: Number, default: 0 }
+    isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 }
 }));
 
 const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String }));
@@ -104,7 +69,6 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
-// --- أنظمة الحماية والمصادقة ---
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 const auth = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -211,6 +175,33 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
+// === مسارات استعادة الـ PIN (الجديدة) ===
+app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        user.otp = otp;
+        await user.save();
+        const isEmail = user.identity.includes('@');
+        if (isEmail && process.env.SMTP_USER) {
+            try { transporter.sendMail({ from: `"BOMA Wallet" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة رمز الـ PIN المالي', html: `<h2>رمزك هو: ${otp}</h2>` }); } catch(e) {}
+        }
+        res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: isEmail ? null : otp });
+    } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); }
+});
+
+app.post('/api/wallet/reset-pin', auth, async (req, res) => {
+    try {
+        const { otp, newPin } = req.body;
+        const user = await User.findById(req.user._id);
+        if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز OTP غير صحيح' });
+        user.pin = await bcrypt.hash(newPin, 10);
+        user.otp = null;
+        await user.save();
+        res.json({ message: 'تم تحديث رمز الـ PIN بنجاح' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
 app.post('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
@@ -221,16 +212,10 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => {
     try {
         const usersCount = await User.countDocuments() || 0;
         const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0;
-        
         const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]);
         const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0;
-        
-        const depositAggr = await FinanceRequest.aggregate([
-            { $match: { type: 'deposit', status: 'approved' } },
-            { $group: { _id: null, totalUSD: { $sum: "$amount" } } }
-        ]);
+        const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]);
         const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; 
-        
         res.json({ usersCount, totalUSD, totalSDG, pendingOrders });
     } catch (e) { res.status(500).json({ message: 'خطأ في جلب الإحصائيات' }); }
 });
@@ -302,25 +287,22 @@ app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => {
 
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
 app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-
 app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
-// --- مسارات المحفظة والحدود اليومية القوية ---
+// --- مسارات المحفظة للمستخدمين بالقيود الدقيقة ---
 // ==========================================
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
@@ -328,11 +310,18 @@ app.post('/api/wallet/deposit', auth, async (req, res) => {
         const user = await User.findById(req.user._id); 
         const amount = Number(req.body.amount);
 
-        const limitCheck = await checkAndApplyLimits(user, 'in', amount);
-        if (!limitCheck.ok) return res.status(400).json({ message: limitCheck.msg });
+        if (!isAdminAccount(user)) {
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const reqs = await FinanceRequest.find({ clientIdentity: user.identity, type: 'deposit', date: { $gte: startOfDay } });
+            const total = reqs.reduce((sum, r) => sum + r.amount, 0);
+            
+            if ((total + amount) > DAILY_DEPOSIT_LIMIT) {
+                const remaining = Math.max(0, DAILY_DEPOSIT_LIMIT - total);
+                return res.status(400).json({ message: `تجاوزت الحد الأقصى للإيداع اليومي. المتبقي لك اليوم: ${remaining} SDG` });
+            }
+        }
 
         await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, receipt: req.body.receipt }).save(); 
-        await user.save(); // حفظ التحديث في الحد اليومي
         res.status(201).json({ message: 'تم إرسال الطلب' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
@@ -343,17 +332,25 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         if (!(await bcrypt.compare(req.body.pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
         const amount = Number(req.body.amount);
         const availableBalance = user.balance - user.frozenBalance;
-        
-        // إعفاء الإدارة من فحص الرصيد الكافي
+
+        // تجاوز حد الرصيد للإدارة فقط
         if (!isAdminAccount(user) && availableBalance < amount) {
             return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
         }
 
-        const limitCheck = await checkAndApplyLimits(user, 'out', amount);
-        if (!limitCheck.ok) return res.status(400).json({ message: limitCheck.msg });
+        if (!isAdminAccount(user)) {
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const reqs = await FinanceRequest.find({ clientIdentity: user.identity, type: 'withdraw', date: { $gte: startOfDay } });
+            const total = reqs.reduce((sum, r) => sum + r.amount, 0);
+            
+            if ((total + amount) > DAILY_WITHDRAW_LIMIT) {
+                const remaining = Math.max(0, DAILY_WITHDRAW_LIMIT - total);
+                return res.status(400).json({ message: `تجاوزت الحد الأقصى للسحب اليومي. المتبقي لك اليوم: ${remaining} SDG` });
+            }
+        }
         
         user.balance -= amount; 
-        await user.save(); // حفظ الرصيد الجديد والحد اليومي
+        await user.save();
 
         await new FinanceRequest({ clientIdentity: user.identity, type: 'withdraw', amount, bankDetails: req.body.bankDetails }).save(); 
         await new Transaction({ clientIdentity: user.identity, type: 'out', amount, title: 'طلب سحب أرباح (قيد المراجعة)' }).save(); 
@@ -373,21 +370,38 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         
         if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
         
-        // إعفاء الإدارة من فحص الرصيد وشروط التوثيق
-        const availableBalance = sender.balance - sender.frozenBalance;
         if (!isAdminAccount(sender)) {
-            if (availableBalance < Number(amount)) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
             if (sender.kycStatus !== 'approved' && Number(amount) > 100) {
                 return res.status(403).json({ message: 'تحتاج توثيق KYC لتحويل مبالغ أكبر من 100 SDG' }); 
             }
+            
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const txs = await Transaction.find({ clientIdentity: sender.identity, type: 'out', title: { $regex: 'حوالة' }, date: { $gte: startOfDay } });
+            const totalTransferred = txs.reduce((sum, t) => sum + t.amount, 0);
+            
+            if ((totalTransferred + Number(amount)) > DAILY_WITHDRAW_LIMIT) {
+                const remaining = Math.max(0, DAILY_WITHDRAW_LIMIT - totalTransferred);
+                return res.status(400).json({ message: `تجاوزت الحد الأقصى للتحويل اليومي. المتبقي لك: ${remaining} SDG` });
+            }
         }
 
-        const senderLimit = await checkAndApplyLimits(sender, 'out', Number(amount));
-        if (!senderLimit.ok) return res.status(400).json({ message: senderLimit.msg });
+        if (!isAdminAccount(receiver)) {
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const txs = await Transaction.find({ clientIdentity: receiver.identity, type: 'in', title: { $regex: 'حوالة' }, date: { $gte: startOfDay } });
+            const totalReceived = txs.reduce((sum, t) => sum + t.amount, 0);
+            
+            if ((totalReceived + Number(amount)) > DAILY_DEPOSIT_LIMIT) {
+                return res.status(400).json({ message: `لا يمكن إتمام العملية، حساب المستلم تجاوز الحد الأقصى لاستقبال الأموال اليومي.` });
+            }
+        }
 
-        const receiverLimit = await checkAndApplyLimits(receiver, 'in', Number(amount));
-        if (!receiverLimit.ok) return res.status(400).json({ message: "المستلم تجاوز الحد الأقصى لاستقبال الأموال اليومي!" });
-
+        const availableBalance = sender.balance - sender.frozenBalance;
+        
+        // تجاوز حد الرصيد للإدارة فقط لتتمكن من سك الأموال
+        if (!isAdminAccount(sender) && availableBalance < Number(amount)) {
+            return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
+        }
+        
         sender.balance -= Number(amount); receiver.balance += Number(amount); 
         await sender.save(); await receiver.save(); 
         
@@ -413,9 +427,6 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         if (!isAdminAccount(user) && availableBalance < totalAmount) {
             return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
         }
-
-        const limitCheck = await checkAndApplyLimits(user, 'out', totalAmount);
-        if (!limitCheck.ok) return res.status(400).json({ message: limitCheck.msg });
 
         user.balance -= totalAmount; 
         await user.save(); 
