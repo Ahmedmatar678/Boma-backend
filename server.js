@@ -30,6 +30,15 @@ const transporter = nodemailer.createTransport({
 const temporarySignups = new Map();
 const MASTER_OTP = "1111"; 
 
+// --- إعدادات الإدارة والحدود اليومية للمحفظة ---
+const ADMIN_ACCOUNTS = ["شركة بومة المحدودة", "ahmedwadmatar1996@gmail.com"]; 
+const DAILY_WITHDRAW_LIMIT = 500000; 
+const DAILY_DEPOSIT_LIMIT = 1000000; 
+
+function isAdminAccount(user) {
+    return ADMIN_ACCOUNTS.includes(user.fullName) || ADMIN_ACCOUNTS.includes(user.identity);
+}
+
 // --- النماذج (Schemas) ---
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
@@ -56,6 +65,7 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
+// --- أنظمة الحماية والمصادقة ---
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 const auth = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -259,6 +269,7 @@ app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user 
 
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -274,12 +285,30 @@ app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banne
 app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
-// --- مسارات المحفظة للمستخدمين ---
+// --- مسارات المحفظة للمستخدمين (بالحدود اليومية) ---
 // ==========================================
+
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
-        await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: req.body.amount, receipt: req.body.receipt }).save(); 
+        const amount = Number(req.body.amount);
+
+        if (!isAdminAccount(user)) {
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const endOfDay = new Date(); endOfDay.setHours(23,59,59,999);
+            
+            const todayDeposits = await FinanceRequest.aggregate([
+                { $match: { clientIdentity: user.identity, type: 'deposit', date: { $gte: startOfDay, $lte: endOfDay } } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]);
+            
+            const totalDepositedToday = todayDeposits.length > 0 ? todayDeposits[0].total : 0;
+            if ((totalDepositedToday + amount) > DAILY_DEPOSIT_LIMIT) {
+                return res.status(400).json({ message: `عذراً، لقد تجاوزت الحد الأقصى للإيداع اليومي (${DAILY_DEPOSIT_LIMIT} SDG).` });
+            }
+        }
+
+        await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, receipt: req.body.receipt }).save(); 
         res.status(201).json({ message: 'تم إرسال الطلب' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
@@ -291,6 +320,21 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         const amount = Number(req.body.amount);
         const availableBalance = user.balance - user.frozenBalance;
         if (availableBalance < amount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
+
+        if (!isAdminAccount(user)) {
+            const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+            const endOfDay = new Date(); endOfDay.setHours(23,59,59,999);
+            
+            const todayWithdraws = await FinanceRequest.aggregate([
+                { $match: { clientIdentity: user.identity, type: 'withdraw', date: { $gte: startOfDay, $lte: endOfDay } } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]);
+            
+            const totalWithdrawnToday = todayWithdraws.length > 0 ? todayWithdraws[0].total : 0;
+            if ((totalWithdrawnToday + amount) > DAILY_WITHDRAW_LIMIT) {
+                return res.status(400).json({ message: `عذراً، لقد تجاوزت الحد الأقصى للسحب اليومي (${DAILY_WITHDRAW_LIMIT} SDG).` });
+            }
+        }
         
         user.balance -= amount; 
         await user.save();
@@ -301,12 +345,41 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
+app.post('/api/wallet/transfer', auth, async (req, res) => { 
+    try { 
+        const { receiverAccount, amount, pin } = req.body; 
+        const sender = await User.findById(req.user._id); 
+        if (sender.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
+        
+        const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
+        if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
+        if (receiver.isSuspended) return res.status(403).json({ message: 'حساب المستلم موقوف' });
+        
+        if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        
+        if (!isAdminAccount(sender)) {
+            if (sender.kycStatus !== 'approved' && Number(amount) > 100) {
+                return res.status(403).json({ message: 'تحتاج توثيق KYC لتحويل مبالغ أكبر من 100' }); 
+            }
+        }
+
+        const availableBalance = sender.balance - sender.frozenBalance;
+        if (availableBalance < Number(amount)) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
+        
+        sender.balance -= Number(amount); receiver.balance += Number(amount); 
+        await sender.save(); await receiver.save(); 
+        
+        await new Transaction({ clientIdentity: sender.identity, type: 'out', amount: Number(amount), title: `حوالة إلى (${receiver.fullName})` }).save(); 
+        await new Transaction({ clientIdentity: receiver.identity, type: 'in', amount: Number(amount), title: `حوالة من (${sender.fullName})` }).save(); 
+        res.json({ newBalance: sender.balance - sender.frozenBalance }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// --- تعديل مسار الدفع لربط بيانات التوصيل ---
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails } = req.body; 
@@ -318,31 +391,10 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         user.balance -= totalAmount; 
         await user.save(); 
         
-        // دمج بيانات التوصيل مع المحفظة
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون بيانات توصيل');
         await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: finalMethod }).save(); 
         await new Transaction({ clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء منتجات من المتجر' }).save(); 
         res.json({ newBalance: user.balance - user.frozenBalance }); 
-    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
-});
-
-app.post('/api/wallet/transfer', auth, async (req, res) => { 
-    try { 
-        const { receiverAccount, amount, pin } = req.body; 
-        const sender = await User.findById(req.user._id); 
-        if (sender.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
-        const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
-        if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
-        if (receiver.isSuspended) return res.status(403).json({ message: 'حساب المستلم موقوف' });
-        if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
-        if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC' }); 
-        const availableBalance = sender.balance - sender.frozenBalance;
-        if (availableBalance < Number(amount)) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
-        sender.balance -= Number(amount); receiver.balance += Number(amount); 
-        await sender.save(); await receiver.save(); 
-        await new Transaction({ clientIdentity: sender.identity, type: 'out', amount: Number(amount), title: `حوالة إلى (${receiver.fullName})` }).save(); 
-        await new Transaction({ clientIdentity: receiver.identity, type: 'in', amount: Number(amount), title: `حوالة من (${sender.fullName})` }).save(); 
-        res.json({ newBalance: sender.balance - sender.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
