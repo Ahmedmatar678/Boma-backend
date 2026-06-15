@@ -36,7 +36,7 @@ const MASTER_OTP = "1111";
 const DAILY_WITHDRAW_LIMIT = 500000;  
 const DAILY_DEPOSIT_LIMIT = 1000000;  
 
-// دالة صارمة للتعرف على حساب الإدارة وإعطائه صلاحيات مطلقة
+// دالة محصنة للتحقق الصارم من حساب الإدارة وفتح الصلاحيات المطلقة
 function isAdminAccount(user) {
     if (!user || !user.identity) return false;
     const ident = String(user.identity).toLowerCase().trim();
@@ -175,7 +175,7 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
-// === مسارات استعادة الـ PIN (الجديدة) ===
+// --- مسارات استعادة الـ PIN ---
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
@@ -397,7 +397,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
 
         const availableBalance = sender.balance - sender.frozenBalance;
         
-        // تجاوز حد الرصيد للإدارة فقط لتتمكن من سك الأموال
         if (!isAdminAccount(sender) && availableBalance < Number(amount)) {
             return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
         }
