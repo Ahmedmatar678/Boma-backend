@@ -102,6 +102,7 @@ app.post('/api/auth/signup', async (req, res) => {
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { identity, otp, purpose, deviceId } = req.body;
+        
         if (purpose === 'new_device') {
             const user = await User.findOne({ identity });
             if (!user) return res.status(404).json({ message: 'غير موجود' });
@@ -112,6 +113,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             }
             return res.status(400).json({ message: 'رمز خاطئ' });
         }
+        
         if (purpose === 'forgot') {
             const user = await User.findOne({ identity });
             if (!user) return res.status(404).json({ message: 'غير موجود' });
@@ -120,10 +122,42 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         } else {
             const tempData = temporarySignups.get(identity);
             if (!tempData) return res.status(400).json({ message: 'انتهت صلاحية الرمز' });
+            
             if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
-                const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: 0, isActive: true, trustedDevice: deviceId });
+                
+                // 🌟 ميزة رصيد الهدية الترحيبية (Welcome Bonus) 🌟
+                const WELCOME_BONUS = 5000;
+
+                const newUser = new User({ 
+                    fullName: tempData.fullName, 
+                    identity: tempData.identity, 
+                    password: tempData.password, 
+                    pin: tempData.pin, 
+                    termsAccepted: tempData.termsAccepted, 
+                    accountNumber: tempData.accountNumber, 
+                    balance: WELCOME_BONUS, // إضافة الـ 5000 كرصيد ابتدائي
+                    isActive: true, 
+                    trustedDevice: deviceId 
+                });
                 await newUser.save();
-                await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: 'تم تفعيل حسابك المالي بنجاح.' }).save();
+                
+                // تسجيل الهدية كمعاملة في كشف حساب العميل ليراها
+                const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
+                await new Transaction({ 
+                    transactionId: txnId, 
+                    clientIdentity: newUser.identity, 
+                    type: 'in', 
+                    amount: WELCOME_BONUS, 
+                    title: 'هدية ترحيبية - تسجيل حساب جديد 🎉' 
+                }).save();
+
+                // إرسال إشعار ترحيبي مع تنبيه بالهدية
+                await new Notification({ 
+                    clientIdentity: newUser.identity, 
+                    title: 'مرحباً بك في بومة 🎉', 
+                    message: `تم تفعيل حسابك المالي بنجاح، وتم إضافة ${WELCOME_BONUS} SDG هدية ترحيبية لرصيدك.` 
+                }).save();
+                
                 temporarySignups.delete(identity);
                 return res.json({ message: 'تم التفعيل بنجاح' });
             } else { return res.status(400).json({ message: 'رمز الـ OTP خاطئ' }); }
@@ -225,9 +259,6 @@ app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-// ==========================================
-// --- مسارات الخدمات (تم الإصلاح والإضافة هنا) ---
-// ==========================================
 app.get('/api/requests', adminAuth, async (req, res) => { 
     try{ res.json(await ServiceRequest.find().sort({date:-1})); } 
     catch(e){ res.status(500).json({message:'خطأ'}); } 
@@ -242,9 +273,6 @@ app.post('/api/requests', async (req, res) => {
     } 
 });
 
-// ==========================================
-// --- مسارات المحفظة ---
-// ==========================================
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
