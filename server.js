@@ -62,7 +62,7 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ cl
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 
-// دالة التحقق من الجلسة (فقط هي من ترسل 403 ليتم تسجيل الخروج)
+// دالة التحقق من الجلسة 
 const auth = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'غير مصرح' });
@@ -101,39 +101,67 @@ app.post('/api/auth/signup', async (req, res) => {
     } catch (e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
 });
 
+// التوجيه الذكي לـ OTP مع معالجة الحسابات القديمة
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { identity, otp, purpose, deviceId } = req.body;
-        if (purpose === 'new_device') {
-            const user = await User.findOne({ identity });
-            if (!user) return res.status(404).json({ message: 'غير موجود' });
-            if (user.otp === String(otp) || String(otp) === MASTER_OTP) {
-                user.trustedDevice = deviceId; user.tokenVersion += 1; user.otp = null; await user.save();
-                const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-                return res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: (user.balance - user.frozenBalance), kycStatus: user.kycStatus } });
-            }
-            return res.status(400).json({ message: 'رمز خاطئ' });
-        }
-        if (purpose === 'forgot') {
-            const user = await User.findOne({ identity });
-            if (!user) return res.status(404).json({ message: 'غير موجود' });
-            if (user.otp === String(otp) || String(otp) === MASTER_OTP) return res.json({ message: 'رمز صحيح' });
-            return res.status(400).json({ message: 'رمز خاطئ' });
-        } else {
-            const tempData = temporarySignups.get(identity);
-            if (!tempData) return res.status(400).json({ message: 'انتهت صلاحية الرمز' });
+
+        // 1. التحقق إذا كان الحساب جديداً (في مرحلة التسجيل)
+        const tempData = temporarySignups.get(identity);
+        if (tempData) {
             if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
                 const WELCOME_BONUS = 5000;
                 const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId });
                 await newUser.save();
+                
                 const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
                 await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية - تسجيل حساب جديد 🎉' }).save();
                 await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: `تم تفعيل حسابك، وتم إضافة ${WELCOME_BONUS} SDG هدية ترحيبية لرصيدك.` }).save();
+                
                 temporarySignups.delete(identity);
                 return res.json({ message: 'تم التفعيل بنجاح' });
-            } else { return res.status(400).json({ message: 'رمز الـ OTP خاطئ' }); }
+            } else {
+                return res.status(400).json({ message: 'رمز الـ OTP خاطئ' });
+            }
         }
-    } catch (e) { return res.status(500).json({ message: 'خطأ أثناء التحقق' }); }
+
+        // 2. إذا لم يكن حساباً جديداً، فهذا يعني أنه يطلب تسجيل دخول لجهاز جديد أو استعادة كلمة السر
+        const user = await User.findOne({ identity });
+        if (!user) {
+            return res.status(404).json({ message: 'الحساب غير موجود أو انتهت صلاحية الجلسة' });
+        }
+
+        if (user.otp === String(otp) || String(otp) === MASTER_OTP) {
+            // إذا كان الغرض هو استعادة كلمة المرور
+            if (purpose === 'forgot') {
+                return res.json({ message: 'رمز صحيح' });
+            }
+
+            // التوجيه الذكي: توثيق هاتف جديد (ومعالجة الحسابات القديمة برمجياً)
+            user.trustedDevice = deviceId || user.trustedDevice;
+            user.tokenVersion = (user.tokenVersion || 0) + 1; // إصلاح رياضي للحساب القديم
+            user.otp = null;
+            await user.save();
+
+            const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
+            return res.json({ 
+                token, 
+                user: { 
+                    name: user.fullName, 
+                    identity: user.identity, 
+                    accountNumber: user.accountNumber, 
+                    balance: (user.balance || 0) - (user.frozenBalance || 0), // منع ظهور Null 
+                    kycStatus: user.kycStatus 
+                } 
+            });
+        }
+
+        return res.status(400).json({ message: 'رمز خاطئ' });
+
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ message: 'خطأ أثناء التحقق' });
+    }
 });
 
 app.post('/api/auth/forgot-password', async (req, res) => {
@@ -173,9 +201,22 @@ app.post('/api/auth/login', async (req, res) => {
             if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Security" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'محاولة دخول من جهاز جديد', html: `<h2>رمز الأمان: ${otp}</h2>` }); } catch(e) {} }
             return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق الجهاز الجديد', fallbackOtp: otp });
         }
-        user.trustedDevice = deviceId; user.tokenVersion += 1; await user.save();
+        
+        user.trustedDevice = deviceId; 
+        user.tokenVersion = (user.tokenVersion || 0) + 1; // معالجة الحسابات القديمة
+        await user.save();
+        
         const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-        return res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: (user.balance - user.frozenBalance), kycStatus: user.kycStatus } });
+        return res.json({ 
+            token, 
+            user: { 
+                name: user.fullName, 
+                identity: user.identity, 
+                accountNumber: user.accountNumber, 
+                balance: (user.balance || 0) - (user.frozenBalance || 0), 
+                kycStatus: user.kycStatus 
+            } 
+        });
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
@@ -225,7 +266,6 @@ app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Ord
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// 🌟 تم الإصلاح: التقاط العناصر سواء كانت cartItems أو items لضمان ظهور المنتجات عند طلبها كاش أو ببنكك 🌟
 app.post('/api/orders', async (req, res) => { 
     try { 
         const orderData = { ...req.body, items: req.body.cartItems || req.body.items };
@@ -243,7 +283,7 @@ app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-// --- المحفظة (مع تعديل أكواد 403 إلى 400 للأخطاء العادية لمنع الخروج الإجباري) ---
+// --- المحفظة ---
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
@@ -270,7 +310,6 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         const amount = Number(req.body.amount);
         if (amount <= 0) return res.status(400).json({ message: 'المبلغ يجب أن يكون أكبر من صفر' });
         const user = await User.findById(req.user._id); 
-        // 🌟 تم الإصلاح: 403 تم تحويله إلى 400
         if (!(await bcrypt.compare(req.body.pin, user.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
         
         const availableBalance = user.balance - user.frozenBalance;
@@ -299,7 +338,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         if (amount <= 0) return res.status(400).json({ message: 'المبلغ يجب أن يكون أكبر من صفر' });
         const { receiverAccount, pin } = req.body; 
         const sender = await User.findById(req.user._id); 
-        // 🌟 تم الإصلاح: 403 تم تحويله إلى 400 لمنع الخروج من الجلسة
         if (sender.isSuspended) return res.status(400).json({ message: 'عذراً، حسابك موقوف' });
         
         const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
@@ -308,7 +346,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         if (!(await bcrypt.compare(pin, sender.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
         
         if (!isAdminAccount(sender)) {
-            // 🌟 تم الإصلاح: 403 تم تحويله إلى 400
             if (sender.kycStatus !== 'approved' && amount > 100) return res.status(400).json({ message: 'تحتاج توثيق KYC لتحويل مبالغ أكبر من 100 SDG' }); 
             const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
             const txs = await Transaction.find({ clientIdentity: sender.identity, type: 'out', title: { $regex: 'حوالة' }, date: { $gte: startOfDay } });
@@ -345,7 +382,6 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         if (Number(totalAmount) <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
         
         const user = await User.findById(req.user._id); 
-        // 🌟 تم الإصلاح: 403 تم تحويله إلى 400
         if (user.isSuspended) return res.status(400).json({ message: 'عذراً، حسابك موقوف' });
         if (!(await bcrypt.compare(pin, user.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
         
