@@ -51,7 +51,11 @@ const User = mongoose.model('User', new mongoose.Schema({
     tokenVersion: { type: Number, default: 0 }
 }));
 
-const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, arName: String, enName: String, price: Number, img: String, arDesc: String, enDesc: String }));
+const Product = mongoose.model('Product', new mongoose.Schema({ 
+    catIdx: Number, arName: String, enName: String, price: Number, 
+    img: String, arDesc: String, enDesc: String,
+    ratings: [{ rating: Number, clientIdentity: String }] // تم إضافة التقييمات
+}));
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
@@ -124,39 +128,17 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             if (!tempData) return res.status(400).json({ message: 'انتهت صلاحية الرمز' });
             
             if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
-                
-                // 🌟 ميزة رصيد الهدية الترحيبية (Welcome Bonus) 🌟
                 const WELCOME_BONUS = 5000;
-
                 const newUser = new User({ 
-                    fullName: tempData.fullName, 
-                    identity: tempData.identity, 
-                    password: tempData.password, 
-                    pin: tempData.pin, 
-                    termsAccepted: tempData.termsAccepted, 
-                    accountNumber: tempData.accountNumber, 
-                    balance: WELCOME_BONUS, // إضافة الـ 5000 كرصيد ابتدائي
-                    isActive: true, 
-                    trustedDevice: deviceId 
+                    fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, 
+                    pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, 
+                    balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId 
                 });
                 await newUser.save();
                 
-                // تسجيل الهدية كمعاملة في كشف حساب العميل ليراها
                 const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
-                await new Transaction({ 
-                    transactionId: txnId, 
-                    clientIdentity: newUser.identity, 
-                    type: 'in', 
-                    amount: WELCOME_BONUS, 
-                    title: 'هدية ترحيبية - تسجيل حساب جديد 🎉' 
-                }).save();
-
-                // إرسال إشعار ترحيبي مع تنبيه بالهدية
-                await new Notification({ 
-                    clientIdentity: newUser.identity, 
-                    title: 'مرحباً بك في بومة 🎉', 
-                    message: `تم تفعيل حسابك المالي بنجاح، وتم إضافة ${WELCOME_BONUS} SDG هدية ترحيبية لرصيدك.` 
-                }).save();
+                await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية - تسجيل حساب جديد 🎉' }).save();
+                await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: `تم تفعيل حسابك، وتم إضافة ${WELCOME_BONUS} SDG هدية ترحيبية لرصيدك.` }).save();
                 
                 temporarySignups.delete(identity);
                 return res.json({ message: 'تم التفعيل بنجاح' });
@@ -231,52 +213,73 @@ app.post('/api/wallet/reset-pin', auth, async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
+// ==========================================
+// --- مسارات الدعم والإشعارات والخدمات ---
+// ==========================================
 app.post('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/requests', async (req, res) => { try{ await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم الإرسال بنجاح' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
-// --- مسارات الإدارة ---
+// --- مسارات الإدارة الشاملة ---
 // ==========================================
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور على عميل' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const { identity } = req.body; if (!identity) return res.json([]); const txs = await Transaction.find({ clientIdentity: identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); try { const requestType = type === 'deposits' ? 'deposit' : 'withdraw'; const { status } = req.body; const request = await FinanceRequest.findById(id); if (!request || request.status !== 'pending') return res.status(400).json({ message: 'طلب معالج مسبقاً' }); request.status = status; await request.save(); const user = await User.findOne({ identity: request.clientIdentity }); if (user) { const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000); if (requestType === 'deposit' && status === 'approved') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'شحن المحفظة (إيداع معتمد)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'شحن المحفظة', message: `تم إضافة ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'rejected') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'استرداد (سحب مرفوض)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم إرجاع ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'approved') { await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} إلى بنكك بنجاح.` }).save(); } await user.save(); } res.json({ message: 'تم التحديث' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/admin/users/cleanup', adminAuth, async (req, res) => { try { const result = await User.deleteMany({ identity: { $ne: "infoboma0@gmail.com" } }); res.json({ message: 'تم التنظيف', deletedCount: result.deletedCount }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => { try { const { isSuspended, frozenBalance } = req.body; const user = await User.findByIdAndUpdate(req.params.id, { isSuspended, frozenBalance: Number(frozenBalance) || 0 }, { new: true }); res.json({ message: 'تم التحديث', user }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user = await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }, { new: true }); res.json({ message: 'تم', user }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// ==========================================
+// --- مسارات المتجر والمنتجات ---
+// ==========================================
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
 app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+// 🌟 مسار التقييم للمنتجات (تم إضافته ليعمل بشكل صحيح) 🌟
+app.post('/api/products/:id/rate', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        const product = await Product.findById(req.params.id);
+        if (!product) return res.status(404).json({ message: 'المنتج غير موجود' });
+        
+        const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity);
+        if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } 
+        else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); }
+        
+        await product.save(); res.json({ message: 'تم التقييم بنجاح' });
+    } catch (e) { res.status(500).json({ message: 'خطأ في التقييم' }); }
+});
+
 app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-app.get('/api/requests', adminAuth, async (req, res) => { 
-    try{ res.json(await ServiceRequest.find().sort({date:-1})); } 
-    catch(e){ res.status(500).json({message:'خطأ'}); } 
-});
-
-app.post('/api/requests', async (req, res) => { 
-    try{ 
-        await new ServiceRequest(req.body).save(); 
-        res.status(201).json({ message: 'تم الإرسال بنجاح' }); 
-    } catch(e){ 
-        res.status(500).json({message:'خطأ'}); 
-    } 
-});
+// ==========================================
+// --- مسارات المحفظة للمستخدمين بالقيود الدقيقة ---
+// ==========================================
+app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
     try { 
-        const user = await User.findById(req.user._id); 
         const amount = Number(req.body.amount);
+        if (amount <= 0) return res.status(400).json({ message: 'المبلغ يجب أن يكون أكبر من صفر' }); // سد الثغرة
+        
+        const user = await User.findById(req.user._id); 
         if (!isAdminAccount(user)) {
             const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
             const reqs = await FinanceRequest.find({ clientIdentity: user.identity, type: 'deposit', date: { $gte: startOfDay } });
@@ -290,13 +293,18 @@ app.post('/api/wallet/deposit', auth, async (req, res) => {
         res.status(201).json({ message: 'تم إرسال الطلب' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
+
 app.post('/api/wallet/withdraw', auth, async (req, res) => { 
     try { 
+        const amount = Number(req.body.amount);
+        if (amount <= 0) return res.status(400).json({ message: 'المبلغ يجب أن يكون أكبر من صفر' }); // سد الثغرة
+        
         const user = await User.findById(req.user._id); 
         if (!(await bcrypt.compare(req.body.pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
-        const amount = Number(req.body.amount);
+        
         const availableBalance = user.balance - user.frozenBalance;
         if (!isAdminAccount(user) && availableBalance < amount) { return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); }
+        
         if (!isAdminAccount(user)) {
             const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
             const reqs = await FinanceRequest.find({ clientIdentity: user.identity, type: 'withdraw', date: { $gte: startOfDay } });
@@ -313,64 +321,72 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
+
 app.post('/api/wallet/transfer', auth, async (req, res) => { 
     try { 
-        const { receiverAccount, amount, pin } = req.body; 
+        const amount = Number(req.body.amount);
+        if (amount <= 0) return res.status(400).json({ message: 'المبلغ يجب أن يكون أكبر من صفر' }); // سد الثغرة
+        
+        const { receiverAccount, pin } = req.body; 
         const sender = await User.findById(req.user._id); 
         if (sender.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
+        
         const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
         if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
         if (receiver.isSuspended) return res.status(403).json({ message: 'حساب المستلم موقوف' });
         if (!(await bcrypt.compare(pin, sender.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        
         if (!isAdminAccount(sender)) {
-            if (sender.kycStatus !== 'approved' && Number(amount) > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC لتحويل مبالغ أكبر من 100 SDG' }); 
+            if (sender.kycStatus !== 'approved' && amount > 100) return res.status(403).json({ message: 'تحتاج توثيق KYC لتحويل مبالغ أكبر من 100 SDG' }); 
             const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
             const txs = await Transaction.find({ clientIdentity: sender.identity, type: 'out', title: { $regex: 'حوالة' }, date: { $gte: startOfDay } });
             const totalTransferred = txs.reduce((sum, t) => sum + t.amount, 0);
-            if ((totalTransferred + Number(amount)) > DAILY_WITHDRAW_LIMIT) return res.status(400).json({ message: `تجاوزت الحد الأقصى للتحويل اليومي` });
+            if ((totalTransferred + amount) > DAILY_WITHDRAW_LIMIT) return res.status(400).json({ message: `تجاوزت الحد الأقصى للتحويل اليومي` });
         }
+        
         if (!isAdminAccount(receiver)) {
             const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
             const txs = await Transaction.find({ clientIdentity: receiver.identity, type: 'in', title: { $regex: 'حوالة' }, date: { $gte: startOfDay } });
             const totalReceived = txs.reduce((sum, t) => sum + t.amount, 0);
-            if ((totalReceived + Number(amount)) > DAILY_DEPOSIT_LIMIT) return res.status(400).json({ message: `حساب المستلم تجاوز الحد اليومي` });
+            if ((totalReceived + amount) > DAILY_DEPOSIT_LIMIT) return res.status(400).json({ message: `حساب المستلم تجاوز الحد اليومي` });
         }
-        const availableBalance = sender.balance - sender.frozenBalance;
-        if (!isAdminAccount(sender) && availableBalance < Number(amount)) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
         
-        sender.balance -= Number(amount); receiver.balance += Number(amount); 
+        const availableBalance = sender.balance - sender.frozenBalance;
+        if (!isAdminAccount(sender) && availableBalance < amount) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
+        
+        sender.balance -= amount; receiver.balance += amount; 
         await sender.save(); await receiver.save(); 
         
         const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
-        await new Transaction({ transactionId: txnId, clientIdentity: sender.identity, type: 'out', amount: Number(amount), title: `حوالة إلى (${receiver.fullName})` }).save(); 
-        await new Transaction({ transactionId: txnId, clientIdentity: receiver.identity, type: 'in', amount: Number(amount), title: `حوالة من (${sender.fullName})` }).save(); 
+        await new Transaction({ transactionId: txnId, clientIdentity: sender.identity, type: 'out', amount: amount, title: `حوالة إلى (${receiver.fullName})` }).save(); 
+        await new Transaction({ transactionId: txnId, clientIdentity: receiver.identity, type: 'in', amount: amount, title: `حوالة من (${sender.fullName})` }).save(); 
         
-        res.json({ newBalance: sender.balance - sender.frozenBalance, receipt: { txnId: txnId, date: new Date(), senderName: sender.fullName, senderAccount: sender.accountNumber, receiverName: receiver.fullName, receiverAccount: receiver.accountNumber, amount: Number(amount) } }); 
+        res.json({ newBalance: sender.balance - sender.frozenBalance, receipt: { txnId: txnId, date: new Date(), senderName: sender.fullName, senderAccount: sender.accountNumber, receiverName: receiver.fullName, receiverAccount: receiver.accountNumber, amount: amount } }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails } = req.body; 
+        if (Number(totalAmount) <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
+        
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(403).json({ message: 'عذراً، حسابك موقوف' });
         if (!(await bcrypt.compare(pin, user.pin))) return res.status(403).json({ message: 'PIN خاطئ' }); 
+        
         const availableBalance = user.balance - user.frozenBalance;
-        if (!isAdminAccount(user) && availableBalance < totalAmount) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
-        user.balance -= totalAmount; await user.save(); 
+        if (!isAdminAccount(user) && availableBalance < Number(totalAmount)) return res.status(400).json({ message: 'الرصيد المتاح غير كافٍ' }); 
+        
+        user.balance -= Number(totalAmount); await user.save(); 
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون بيانات توصيل');
-        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: finalMethod }).save(); 
-        await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء منتجات من المتجر' }).save(); 
+        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount: Number(totalAmount), paymentMethod: finalMethod }).save(); 
+        await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: Number(totalAmount), title: 'شراء منتجات من المتجر' }).save(); 
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
-app.post('/api/orders', async (req, res) => { try { await new Order(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 BOMA Server Secure Running on port ${PORT}`); });
