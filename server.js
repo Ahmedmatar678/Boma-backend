@@ -39,7 +39,6 @@ function isAdminAccount(user) {
     return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com';
 }
 
-// --- النماذج (Schemas) ---
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' },
@@ -62,7 +61,6 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ cl
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 
-// دالة التحقق من الجلسة 
 const auth = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'غير مصرح' });
@@ -96,72 +94,105 @@ app.post('/api/auth/signup', async (req, res) => {
         const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001;
         temporarySignups.set(identity, { fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp });
         setTimeout(() => { if (temporarySignups.has(identity)) temporarySignups.delete(identity); }, 10 * 60 * 1000);
-        if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Pay" <${process.env.SMTP_USER}>`, to: identity, subject: 'رمز تفعيل حسابك - BOMA', html: `<h1 style="color:#ff6e40;">${otp}</h1>` }); } catch (e) {} }
+        if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Pay" <${process.env.SMTP_USER}>`, to: identity, subject: 'رمز تفعيل حسابك', html: `<h1>${otp}</h1>` }); } catch (e) {} }
         return res.status(201).json({ identity, isEmail, fallbackOtp: otp }); 
     } catch (e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
 });
 
-// التوجيه الذكي לـ OTP مع معالجة الحسابات القديمة
+// 🌟 النظام الجديد لتجاوز أخطاء الحسابات القديمة 🌟
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { identity, otp, purpose, deviceId } = req.body;
 
-        // 1. التحقق إذا كان الحساب جديداً (في مرحلة التسجيل)
         const tempData = temporarySignups.get(identity);
         if (tempData) {
-            if (tempData.otp === String(otp) || String(otp) === MASTER_OTP) {
-                const WELCOME_BONUS = 5000;
-                const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId });
-                await newUser.save();
-                
-                const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
-                await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية - تسجيل حساب جديد 🎉' }).save();
-                await new Notification({ clientIdentity: newUser.identity, title: 'مرحباً بك في بومة 🎉', message: `تم تفعيل حسابك، وتم إضافة ${WELCOME_BONUS} SDG هدية ترحيبية لرصيدك.` }).save();
-                
-                temporarySignups.delete(identity);
-                return res.json({ message: 'تم التفعيل بنجاح' });
-            } else {
-                return res.status(400).json({ message: 'رمز الـ OTP خاطئ' });
-            }
+            if (String(otp) === String(tempData.otp) || String(otp) === MASTER_OTP) {
+                try {
+                    const WELCOME_BONUS = 5000;
+                    const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId });
+                    await newUser.save();
+                    const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
+                    await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية 🎉' }).save();
+                    temporarySignups.delete(identity);
+                    return res.json({ message: 'تم التفعيل بنجاح' });
+                } catch (saveErr) {
+                    return res.status(400).json({ message: 'هذا الحساب مفعل مسبقاً، يرجى تسجيل الدخول.' });
+                }
+            } else { return res.status(400).json({ message: 'رمز الـ OTP خاطئ' }); }
         }
 
-        // 2. إذا لم يكن حساباً جديداً، فهذا يعني أنه يطلب تسجيل دخول لجهاز جديد أو استعادة كلمة السر
         const user = await User.findOne({ identity });
-        if (!user) {
-            return res.status(404).json({ message: 'الحساب غير موجود أو انتهت صلاحية الجلسة' });
-        }
+        if (!user) return res.status(404).json({ message: 'الحساب غير موجود' });
 
-        if (user.otp === String(otp) || String(otp) === MASTER_OTP) {
-            // إذا كان الغرض هو استعادة كلمة المرور
-            if (purpose === 'forgot') {
-                return res.json({ message: 'رمز صحيح' });
-            }
+        if (String(otp) === String(user.otp) || String(otp) === MASTER_OTP) {
+            if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' });
 
-            // التوجيه الذكي: توثيق هاتف جديد (ومعالجة الحسابات القديمة برمجياً)
-            user.trustedDevice = deviceId || user.trustedDevice;
-            user.tokenVersion = (user.tokenVersion || 0) + 1; // إصلاح رياضي للحساب القديم
-            user.otp = null;
-            await user.save();
+            // استخدام findOneAndUpdate لتجاوز أي مشاكل في هيكل الحساب القديم
+            const updatedUser = await User.findOneAndUpdate(
+                { identity },
+                { 
+                    $set: { trustedDevice: deviceId || '', otp: null },
+                    $inc: { tokenVersion: 1 }
+                },
+                { new: true }
+            );
 
-            const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
+            if (!updatedUser) return res.status(500).json({ message: 'خطأ في تحديث البيانات' });
+
+            const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
             return res.json({ 
                 token, 
                 user: { 
-                    name: user.fullName, 
-                    identity: user.identity, 
-                    accountNumber: user.accountNumber, 
-                    balance: (user.balance || 0) - (user.frozenBalance || 0), // منع ظهور Null 
-                    kycStatus: user.kycStatus 
+                    name: updatedUser.fullName || 'عميل', 
+                    identity: updatedUser.identity, 
+                    accountNumber: updatedUser.accountNumber, 
+                    balance: (Number(updatedUser.balance) || 0) - (Number(updatedUser.frozenBalance) || 0), 
+                    kycStatus: updatedUser.kycStatus || 'pending'
                 } 
             });
         }
-
         return res.status(400).json({ message: 'رمز خاطئ' });
+    } catch (e) { return res.status(500).json({ message: `خطأ اتصال: ${e.message}` }); }
+});
 
-    } catch (e) {
-        console.error(e);
-        return res.status(500).json({ message: 'خطأ أثناء التحقق' });
-    }
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { identity, password, deviceId } = req.body;
+        const user = await User.findOne({ identity });
+        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات خاطئة' });
+        if (user.isSuspended) return res.status(400).json({ message: 'هذا الحساب موقوف مؤقتاً من قبل الإدارة' }); 
+        
+        // تجاهل كلمة undefined التي تسببت في المشكلة
+        if (user.trustedDevice && user.trustedDevice !== 'undefined' && user.trustedDevice !== deviceId) {
+            const otp = Math.floor(1000 + Math.random() * 9000).toString();
+            user.otp = otp; await user.save();
+            const isEmail = user.identity.includes('@');
+            if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Security" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'محاولة دخول من جهاز جديد', html: `<h2>رمز الأمان: ${otp}</h2>` }); } catch(e) {} }
+            return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق الجهاز الجديد', fallbackOtp: otp });
+        }
+        
+        // استخدام findOneAndUpdate لضمان الدخول السلس للحسابات القديمة
+        const updatedUser = await User.findOneAndUpdate(
+            { identity },
+            { 
+                $set: { trustedDevice: deviceId || '' },
+                $inc: { tokenVersion: 1 }
+            },
+            { new: true }
+        );
+
+        const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
+        return res.json({ 
+            token, 
+            user: { 
+                name: updatedUser.fullName, 
+                identity: updatedUser.identity, 
+                accountNumber: updatedUser.accountNumber, 
+                balance: (Number(updatedUser.balance) || 0) - (Number(updatedUser.frozenBalance) || 0), 
+                kycStatus: updatedUser.kycStatus || 'pending'
+            } 
+        });
+    } catch (e) { return res.status(500).json({ message: 'خطأ اتصال' }); }
 });
 
 app.post('/api/auth/forgot-password', async (req, res) => {
@@ -185,39 +216,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
         user.otp = null; user.tokenVersion += 1; await user.save();
         return res.json({message: 'تم تحديث كلمة المرور'});
     } catch(e) { return res.status(500).json({message: 'خطأ'}); }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { identity, password, deviceId } = req.body;
-        const user = await User.findOne({ identity });
-        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات خاطئة' });
-        if (user.isSuspended) return res.status(400).json({ message: 'هذا الحساب موقوف مؤقتاً من قبل الإدارة' }); 
-        
-        if (user.trustedDevice && user.trustedDevice !== deviceId) {
-            const otp = Math.floor(1000 + Math.random() * 9000).toString();
-            user.otp = otp; await user.save();
-            const isEmail = user.identity.includes('@');
-            if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Security" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'محاولة دخول من جهاز جديد', html: `<h2>رمز الأمان: ${otp}</h2>` }); } catch(e) {} }
-            return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق الجهاز الجديد', fallbackOtp: otp });
-        }
-        
-        user.trustedDevice = deviceId; 
-        user.tokenVersion = (user.tokenVersion || 0) + 1; // معالجة الحسابات القديمة
-        await user.save();
-        
-        const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-        return res.json({ 
-            token, 
-            user: { 
-                name: user.fullName, 
-                identity: user.identity, 
-                accountNumber: user.accountNumber, 
-                balance: (user.balance || 0) - (user.frozenBalance || 0), 
-                kycStatus: user.kycStatus 
-            } 
-        });
-    } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
@@ -249,7 +247,6 @@ app.put('/api/notifications/read', auth, async (req, res) => { try { const user 
 app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/requests', async (req, res) => { try{ await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم الإرسال بنجاح' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-// --- مسارات الإدارة ---
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور على عميل' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const { identity } = req.body; if (!identity) return res.json([]); const txs = await Transaction.find({ clientIdentity: identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -261,18 +258,10 @@ app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { const user 
 app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// --- المتجر ---
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }, { new: true }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
-app.post('/api/orders', async (req, res) => { 
-    try { 
-        const orderData = { ...req.body, items: req.body.cartItems || req.body.items };
-        await new Order(orderData).save(); 
-        res.status(201).json({ message: 'تم' }); 
-    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
-});
+app.post('/api/orders', async (req, res) => { try { const orderData = { ...req.body, items: req.body.cartItems || req.body.items }; await new Order(orderData).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
@@ -283,7 +272,6 @@ app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 
-// --- المحفظة ---
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
