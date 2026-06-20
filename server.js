@@ -37,7 +37,7 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     adminPasswordHash: { type: String, default: '' },
     adminEmail: { type: String, default: 'admin@boma.com' },
 
-    termsText: { type: String, default: '' }, // الشروط والخصوصية
+    termsText: { type: String, default: '' }, 
     uiSettings: { type: Object, default: {} } // تخزين جميع خصائص الواجهة والألوان
 }));
 
@@ -55,13 +55,20 @@ const Announcement = mongoose.model('Announcement', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
-mongoose.connect(process.env.MONGO_URI)
-    .then(async () => {
-        console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!");
-        const settings = await AppSettings.findOne();
-        if (!settings) await new AppSettings().save();
-    })
-    .catch(err => console.error("❌ خطأ الاتصال بقاعدة البيانات:", err));
+// إعدادات اتصال متقدمة لتجنب انقطاع السيرفر المجاني
+mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 30000, 
+    socketTimeoutMS: 45000,
+})
+.then(async () => {
+    console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!");
+    const settings = await AppSettings.findOne();
+    if (!settings) await new AppSettings().save();
+})
+.catch(err => {
+    console.error("❌ خطأ الاتصال بقاعدة البيانات:", err);
+    process.exit(1); 
+});
 
 const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -278,7 +285,6 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
         settings.bankakWhatsApp = req.body.bankakWhatsApp;
         settings.isBankakEnabled = req.body.isBankakEnabled;
         
-        // 🌟 حفظ إعدادات الواجهة (المظهر والألوان)
         if (req.body.uiSettings) settings.uiSettings = req.body.uiSettings; 
         
         await settings.save();
@@ -384,7 +390,7 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => {
 });
 
 // ==========================================
-// 🌟 7. المتجر والتوصيل والطلبات 🌟
+// 🌟 7. المتجر والتوصيل والطلبات والبنرات 🌟
 // ==========================================
 app.get('/api/delivery-zones', async (req, res) => { try { res.json(await DeliveryZone.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -413,6 +419,7 @@ app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await 
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products/:id/rate', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ message: 'غير موجود' }); const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity); if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); } await product.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
+// البنرات والسلايدر
 app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
@@ -427,7 +434,7 @@ app.post('/api/requests', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل) 🌟
+// 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
