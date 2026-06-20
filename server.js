@@ -15,25 +15,46 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'authorization', 'x-admin-pass']
 }));
 
-// --- إعدادات النظام للتحكم بالخدمات والأقسام ديناميكياً ---
+// ==========================================
+// 🌟 1. نماذج الإعدادات، الأقسام، والإعلانات 🌟
+// ==========================================
 const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isTransferEnabled: { type: Boolean, default: true },
     isWithdrawEnabled: { type: Boolean, default: true },
     isDepositEnabled: { type: Boolean, default: true },
     isStoreEnabled: { type: Boolean, default: true },
-    isServicesEnabled: { type: Boolean, default: true }
+    isServicesEnabled: { type: Boolean, default: true },
+    
+    bankakAccount: { type: String, default: '' },
+    bankakName: { type: String, default: '' },
+    bankakWhatsApp: { type: String, default: '' },
+    isBankakEnabled: { type: Boolean, default: true },
+
+    decorationType: { type: String, default: 'none' }, // none, ramadan, eid-adha, eid-fitr, custom
+    decorationCustomUrl: { type: String, default: '' },
+    isDecorationActive: { type: Boolean, default: false },
+
+    adminPasswordHash: { type: String, default: '' },
+    adminEmail: { type: String, default: 'admin@boma.com' } // ضع هنا إيميل الإدارة الحقيقي لاستعادة الرمز
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
     arName: String,
     enName: String,
-    icon: String // إيموجي أو رابط
+    icon: String 
+}));
+
+const Announcement = mongoose.model('Announcement', new mongoose.Schema({
+    title: String,
+    message: String,
+    type: String, // popup, notification
+    count: String, // 1, 3, always
+    date: { type: Date, default: Date.now }
 }));
 
 mongoose.connect(process.env.MONGO_URI)
     .then(async () => {
         console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!");
-        // تهيئة إعدادات التطبيق الافتراضية إذا لم تكن موجودة
         const settings = await AppSettings.findOne();
         if (!settings) await new AppSettings().save();
     })
@@ -49,7 +70,6 @@ const transporter = nodemailer.createTransport({
 
 const temporarySignups = new Map();
 const MASTER_OTP = "1111"; 
-
 const DAILY_WITHDRAW_LIMIT = 500000;  
 const DAILY_DEPOSIT_LIMIT = 1000000;  
 
@@ -59,6 +79,9 @@ function isAdminAccount(user) {
     return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com';
 }
 
+// ==========================================
+// 🌟 2. النماذج الأساسية (العملاء، المنتجات، المحفظة) 🌟
+// ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
@@ -69,11 +92,8 @@ const User = mongoose.model('User', new mongoose.Schema({
 }));
 
 const Product = mongoose.model('Product', new mongoose.Schema({ 
-    catIdx: Number, 
-    categoryId: String, // 🌟 المعرف الديناميكي للقسم الجديد 🌟
-    arName: String, enName: String, price: Number, 
-    stock: { type: Number, default: 0 }, 
-    img: String, gallery: { type: [String], default: [] }, 
+    catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, 
+    stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, 
     arDesc: String, enDesc: String, variations: { type: [String], default: [] }, 
     ratings: [{ rating: Number, clientIdentity: String }] 
 }));
@@ -89,6 +109,9 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ cl
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 
+// ==========================================
+// 🌟 3. حراس الأمان (Middlewares) 🌟
+// ==========================================
 const auth = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'غير مصرح' });
@@ -100,13 +123,26 @@ const auth = async (req, res, next) => {
     } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); }
 };
 
-const ADMIN_PASS = process.env.ADMIN_PASS || 'BomaAdmin2026';
-const adminAuth = (req, res, next) => {
+// حارس أمان الإدارة الديناميكي
+const adminAuth = async (req, res, next) => {
     const pass = req.headers['x-admin-pass'];
-    if (!pass || pass !== ADMIN_PASS) return res.status(403).json({ message: 'وصول مرفوض' });
-    next();
+    if (!pass) return res.status(403).json({ message: 'وصول مرفوض' });
+    try {
+        const settings = await AppSettings.findOne();
+        let isValid = false;
+        if (settings && settings.adminPasswordHash) {
+            isValid = await bcrypt.compare(pass, settings.adminPasswordHash);
+        } else {
+            isValid = (pass === (process.env.ADMIN_PASS || 'BomaAdmin2026'));
+        }
+        if (!isValid) return res.status(403).json({ message: 'كلمة المرور خاطئة' });
+        next();
+    } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
 };
 
+// ==========================================
+// 🌟 4. مسارات التوثيق للعملاء 🌟
+// ==========================================
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
@@ -199,6 +235,163 @@ app.post('/api/auth/reset-password', async (req, res) => {
     } catch(e) { return res.status(500).json({message: 'خطأ'}); }
 });
 
+// ==========================================
+// 🌟 5. مسارات الإدارة المركزية والأمان 🌟
+// ==========================================
+app.get('/api/settings', async (req, res) => {
+    try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
+    catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.get('/api/admin/settings', adminAuth, async (req, res) => {
+    try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
+    catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.put('/api/admin/settings', adminAuth, async (req, res) => {
+    try { 
+        let settings = await AppSettings.findOne();
+        if(!settings) settings = new AppSettings();
+        settings.isTransferEnabled = req.body.isTransferEnabled;
+        settings.isWithdrawEnabled = req.body.isWithdrawEnabled;
+        settings.isDepositEnabled = req.body.isDepositEnabled;
+        settings.isStoreEnabled = req.body.isStoreEnabled;
+        settings.isServicesEnabled = req.body.isServicesEnabled;
+        settings.bankakAccount = req.body.bankakAccount;
+        settings.bankakName = req.body.bankakName;
+        settings.bankakWhatsApp = req.body.bankakWhatsApp;
+        settings.isBankakEnabled = req.body.isBankakEnabled;
+        await settings.save();
+        res.json({ message: 'تم تحديث الإعدادات' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.put('/api/admin/settings/decorations', adminAuth, async (req, res) => {
+    try {
+        await AppSettings.findOneAndUpdate({}, { 
+            decorationType: req.body.decorationType, 
+            decorationCustomUrl: req.body.decorationCustomUrl, 
+            isDecorationActive: req.body.isDecorationActive 
+        });
+        res.json({ message: 'تم' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+// إدارة الأمان للإدارة
+app.post('/api/admin/change-password', adminAuth, async (req, res) => {
+    try {
+        const settings = await AppSettings.findOne();
+        const { oldPass, newPass } = req.body;
+        
+        let isValid = false;
+        if(settings && settings.adminPasswordHash) {
+            isValid = await bcrypt.compare(oldPass, settings.adminPasswordHash);
+        } else {
+            isValid = (oldPass === (process.env.ADMIN_PASS || 'BomaAdmin2026'));
+        }
+
+        if(!isValid) return res.status(400).json({ message: 'كلمة المرور القديمة خاطئة' });
+
+        settings.adminPasswordHash = await bcrypt.hash(newPass, 10);
+        await settings.save();
+        res.json({ message: 'تم التغيير' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.post('/api/admin/forgot-password', async (req, res) => {
+    try {
+        const settings = await AppSettings.findOne();
+        const targetEmail = settings.adminEmail || process.env.ADMIN_EMAIL || 'admin@boma.com';
+        
+        if(req.body.email !== targetEmail) {
+            return res.status(400).json({ message: 'بريد غير مصرح للإدارة' });
+        }
+        
+        const tempPass = 'Admin' + Math.floor(1000 + Math.random() * 9000);
+        settings.adminPasswordHash = await bcrypt.hash(tempPass, 10);
+        await settings.save();
+        
+        if(process.env.SMTP_USER) {
+            transporter.sendMail({
+                from: `"BOMA Admin Security" <${process.env.SMTP_USER}>`,
+                to: targetEmail,
+                subject: 'تنبيه: استعادة كلمة مرور الإدارة',
+                html: `<h3>تم طلب استعادة لحساب الإدارة. كلمة المرور المؤقتة الخاصة بك هي:</h3><h1 style="color:#ff6e40;">${tempPass}</h1><p>الرجاء تسجيل الدخول بها ثم التوجه لقسم (تغيير الرمز السري) وتغييرها فوراً.</p>`
+            }).catch(()=>{});
+        }
+        res.json({ message: 'تم إرسال كلمة مرور مؤقتة' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+// الإعلانات والتنبيهات
+app.get('/api/announcements', async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.get('/api/admin/announcements', adminAuth, async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.post('/api/admin/announcements', adminAuth, async (req, res) => { try { await new Announcement(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/admin/announcements/:id', adminAuth, async (req, res) => { try { await Announcement.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+
+// الأقسام الديناميكية
+app.get('/api/categories', async (req, res) => { try { res.json(await Category.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+
+// باقي مسارات الإدارة 
+app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); try { const requestType = type === 'deposits' ? 'deposit' : 'withdraw'; const { status } = req.body; const request = await FinanceRequest.findById(id); if (!request || request.status !== 'pending') return res.status(400).json({ message: 'معالج مسبقاً' }); request.status = status; await request.save(); const user = await User.findOne({ identity: request.clientIdentity }); if (user) { const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000); if (requestType === 'deposit' && status === 'approved') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'شحن المحفظة (معتمد)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'شحن المحفظة', message: `تم إضافة ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'rejected') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'استرداد (سحب مرفوض)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم إرجاع ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'approved') { await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} إلى بنكك.` }).save(); } await user.save(); } res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { isSuspended: req.body.isSuspended, frozenBalance: Number(req.body.frozenBalance) || 0 }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// ==========================================
+// 🌟 6. المتجر والتوصيل والطلبات 🌟
+// ==========================================
+app.get('/api/delivery-zones', async (req, res) => { try { res.json(await DeliveryZone.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/admin/delivery-zones/:id', adminAuth, async (req, res) => { try { await DeliveryZone.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+app.post('/api/orders', async (req, res) => { 
+    try { 
+        const settings = await AppSettings.findOne();
+        if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، المتجر متوقف مؤقتاً للصيانة' });
+        
+        const cartItems = req.body.cartItems || req.body.items || [];
+        const orderData = { ...req.body, items: cartItems }; 
+        await new Order(orderData).save(); 
+        
+        for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); }
+        res.status(201).json({ message: 'تم' }); 
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/products/:id/rate', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ message: 'غير موجود' }); const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity); if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); } await product.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+
+app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.post('/api/requests', async (req, res) => { 
+    try { 
+        const settings = await AppSettings.findOne();
+        if(settings && !settings.isServicesEnabled) return res.status(400).json({ message: 'عذراً، استقبال طلبات المشاريع متوقف مؤقتاً' });
+        await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); 
+    } catch(e) { res.status(500).json({message:'خطأ'}); } 
+});
+
+// ==========================================
+// 🌟 7. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
+// ==========================================
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
@@ -221,99 +414,6 @@ app.post('/api/wallet/reset-pin', auth, async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
-app.post('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/support', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
-// ==========================================
-// --- الإدارة المركزية والأقسام والإعدادات ---
-// ==========================================
-app.get('/api/settings', async (req, res) => {
-    try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
-    catch(e) { res.status(500).json({ message: 'خطأ' }); }
-});
-
-app.get('/api/admin/settings', adminAuth, async (req, res) => {
-    try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
-    catch(e) { res.status(500).json({ message: 'خطأ' }); }
-});
-
-app.put('/api/admin/settings', adminAuth, async (req, res) => {
-    try { 
-        let settings = await AppSettings.findOne();
-        if(!settings) settings = new AppSettings();
-        settings.isTransferEnabled = req.body.isTransferEnabled;
-        settings.isWithdrawEnabled = req.body.isWithdrawEnabled;
-        settings.isDepositEnabled = req.body.isDepositEnabled;
-        settings.isStoreEnabled = req.body.isStoreEnabled;
-        settings.isServicesEnabled = req.body.isServicesEnabled;
-        await settings.save();
-        res.json({ message: 'تم تحديث الإعدادات' });
-    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
-});
-
-// الأقسام الديناميكية
-app.get('/api/categories', async (req, res) => { try { res.json(await Category.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-
-
-app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); try { const requestType = type === 'deposits' ? 'deposit' : 'withdraw'; const { status } = req.body; const request = await FinanceRequest.findById(id); if (!request || request.status !== 'pending') return res.status(400).json({ message: 'معالج مسبقاً' }); request.status = status; await request.save(); const user = await User.findOne({ identity: request.clientIdentity }); if (user) { const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000); if (requestType === 'deposit' && status === 'approved') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'شحن المحفظة (معتمد)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'شحن المحفظة', message: `تم إضافة ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'rejected') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'استرداد (سحب مرفوض)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم إرجاع ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'approved') { await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} إلى بنكك.` }).save(); } await user.save(); } res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { isSuspended: req.body.isSuspended, frozenBalance: Number(req.body.frozenBalance) || 0 }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
-// --- المتجر والتوصيل والطلبات ---
-app.get('/api/delivery-zones', async (req, res) => { try { res.json(await DeliveryZone.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-app.delete('/api/admin/delivery-zones/:id', adminAuth, async (req, res) => { try { await DeliveryZone.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
-app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-
-// الدفع الكاش (مربوط بحارس الأمان)
-app.post('/api/orders', async (req, res) => { 
-    try { 
-        const settings = await AppSettings.findOne();
-        if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، خدمات المتجر متوقفة مؤقتاً للصيانة' });
-        
-        const cartItems = req.body.cartItems || req.body.items || [];
-        const orderData = { ...req.body, items: cartItems }; 
-        await new Order(orderData).save(); 
-        
-        for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); }
-        res.status(201).json({ message: 'تم' }); 
-    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
-});
-
-app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.post('/api/products/:id/rate', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ message: 'غير موجود' }); const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity); if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); } await product.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-
-app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-
-// طلبات الخدمات
-app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await ServiceRequest.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
-app.post('/api/requests', async (req, res) => { 
-    try { 
-        const settings = await AppSettings.findOne();
-        if(settings && !settings.isServicesEnabled) return res.status(400).json({ message: 'عذراً، استقبال طلبات المشاريع متوقف مؤقتاً' });
-        await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); 
-    } catch(e) { res.status(500).json({message:'خطأ'}); } 
-});
-
-// ==========================================
-// --- مسارات المحفظة (التحويل، الشحن، السحب، المتجر) مع حراس الأمان ---
-// ==========================================
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => {
     try {
         const accNum = Number(req.params.accountNumber);
@@ -327,7 +427,7 @@ app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => {
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne();
-        if(settings && !settings.isDepositEnabled) return res.status(400).json({ message: 'عذراً، خدمة الإيداع (الشحن) متوقفة حالياً للصيانة' });
+        if(settings && !settings.isDepositEnabled) return res.status(400).json({ message: 'عذراً، خدمة الشحن متوقفة حالياً للصيانة' });
 
         const user = await User.findById(req.user._id); 
         const amount = Number(req.body.amount);
