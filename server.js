@@ -35,7 +35,7 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isDecorationActive: { type: Boolean, default: false },
 
     adminPasswordHash: { type: String, default: '' },
-    adminEmail: { type: String, default: 'admin@boma.com' } // ضع هنا إيميل الإدارة الحقيقي لاستعادة الرمز
+    adminEmail: { type: String, default: 'admin@boma.com' }
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
@@ -102,7 +102,7 @@ const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
-const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now } }));
+const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
 const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ clientIdentity: String, type: { type: String, enum: ['deposit', 'withdraw'] }, amount: Number, currency: { type: String, default: 'SDG' }, receipt: String, bankDetails: String, status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }, date: { type: Date, default: Date.now } }));
@@ -123,7 +123,6 @@ const auth = async (req, res, next) => {
     } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); }
 };
 
-// حارس أمان الإدارة الديناميكي
 const adminAuth = async (req, res, next) => {
     const pass = req.headers['x-admin-pass'];
     if (!pass) return res.status(403).json({ message: 'وصول مرفوض' });
@@ -277,21 +276,17 @@ app.put('/api/admin/settings/decorations', adminAuth, async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
-// إدارة الأمان للإدارة
 app.post('/api/admin/change-password', adminAuth, async (req, res) => {
     try {
         const settings = await AppSettings.findOne();
         const { oldPass, newPass } = req.body;
-        
         let isValid = false;
         if(settings && settings.adminPasswordHash) {
             isValid = await bcrypt.compare(oldPass, settings.adminPasswordHash);
         } else {
             isValid = (oldPass === (process.env.ADMIN_PASS || 'BomaAdmin2026'));
         }
-
         if(!isValid) return res.status(400).json({ message: 'كلمة المرور القديمة خاطئة' });
-
         settings.adminPasswordHash = await bcrypt.hash(newPass, 10);
         await settings.save();
         res.json({ message: 'تم التغيير' });
@@ -302,15 +297,10 @@ app.post('/api/admin/forgot-password', async (req, res) => {
     try {
         const settings = await AppSettings.findOne();
         const targetEmail = settings.adminEmail || process.env.ADMIN_EMAIL || 'admin@boma.com';
-        
-        if(req.body.email !== targetEmail) {
-            return res.status(400).json({ message: 'بريد غير مصرح للإدارة' });
-        }
-        
+        if(req.body.email !== targetEmail) { return res.status(400).json({ message: 'بريد غير مصرح للإدارة' }); }
         const tempPass = 'Admin' + Math.floor(1000 + Math.random() * 9000);
         settings.adminPasswordHash = await bcrypt.hash(tempPass, 10);
         await settings.save();
-        
         if(process.env.SMTP_USER) {
             transporter.sendMail({
                 from: `"BOMA Admin Security" <${process.env.SMTP_USER}>`,
@@ -334,7 +324,6 @@ app.get('/api/categories', async (req, res) => { try { res.json(await Category.f
 app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
-// باقي مسارات الإدارة 
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -343,11 +332,58 @@ app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { const { t
 app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { isSuspended: req.body.isSuspended, frozenBalance: Number(req.body.frozenBalance) || 0 }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/support', adminAuth, async (req, res) => { try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `تم الرد على تذكرتك.` }).save(); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 // ==========================================
-// 🌟 6. المتجر والتوصيل والطلبات 🌟
+// 🌟 6. مسارات الدعم الفني (للعميل والإدارة) 🌟
+// ==========================================
+
+// مسار إرسال التذكرة للعميل
+app.post('/api/support', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        await new Ticket({ 
+            clientIdentity: user.identity, 
+            clientName: user.fullName, 
+            subject: req.body.subject, 
+            message: req.body.message 
+        }).save(); 
+        res.json({ message: 'تم الإرسال' }); 
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+// مسار استعراض تذاكر العميل
+app.get('/api/support', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); 
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+// مسار الدعم الفني للإدارة
+app.get('/api/admin/support', adminAuth, async (req, res) => { 
+    try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+// 🌟 تحديث مسار الرد: الإشعار سيحتوي على نص الرد الفعلي 🌟
+app.put('/api/admin/support/:id', adminAuth, async (req, res) => { 
+    try { 
+        const ticket = await Ticket.findByIdAndUpdate(req.params.id, { 
+            adminReply: req.body.reply, 
+            status: 'replied' 
+        }, { new: true }); 
+        
+        await new Notification({ 
+            clientIdentity: ticket.clientIdentity, 
+            title: 'رد الدعم الفني', 
+            message: `الرد: ${req.body.reply}`  // تم التحديث هنا ليظهر نص الرد 
+        }).save(); 
+        
+        res.json({ message: 'تم' }); 
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+// ==========================================
+// 🌟 7. المتجر والتوصيل والطلبات 🌟
 // ==========================================
 app.get('/api/delivery-zones', async (req, res) => { try { res.json(await DeliveryZone.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -390,7 +426,7 @@ app.post('/api/requests', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 7. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
+// 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
