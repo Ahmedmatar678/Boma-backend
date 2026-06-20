@@ -16,7 +16,7 @@ app.use(cors({
 }));
 
 // ==========================================
-// 🌟 1. نماذج الإعدادات المركزية (بما فيها المظهر والشروط) 🌟
+// 🌟 1. نماذج الإعدادات المركزية (المظهر، الخدمات، الشروط) 🌟
 // ==========================================
 const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isTransferEnabled: { type: Boolean, default: true },
@@ -37,8 +37,8 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     adminPasswordHash: { type: String, default: '' },
     adminEmail: { type: String, default: 'admin@boma.com' },
 
-    termsText: { type: String, default: '' }, // حفظ الشروط والخصوصية
-    uiSettings: { type: Object, default: {} } // حفظ تخصيصات المظهر بالكامل (الألوان والأزرار)
+    termsText: { type: String, default: '' }, // الشروط والخصوصية
+    uiSettings: { type: Object, default: {} } // تخزين جميع خصائص الواجهة والألوان
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
@@ -83,7 +83,7 @@ function isAdminAccount(user) {
 }
 
 // ==========================================
-// 🌟 2. النماذج الأساسية (العملاء، المنتجات، المحفظة) 🌟
+// 🌟 2. النماذج الأساسية للمستخدمين والعمليات 🌟
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
@@ -143,38 +143,47 @@ const adminAuth = async (req, res, next) => {
 };
 
 // ==========================================
-// 🌟 4. مسارات التوثيق للعملاء 🌟
+// 🌟 4. مسارات التوثيق (تسجيل، دخول، OTP) 🌟
 // ==========================================
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { fullName, identity, password, pin, termsAccepted } = req.body;
         const existingUser = await User.findOne({ identity });
-        if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'هذا الحساب مسجل' });
+        if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'هذا الحساب مسجل مسبقاً' });
+        
         const hashedPassword = await bcrypt.hash(password, 10);
         const hashedPin = await bcrypt.hash(pin, 10);
         const otp = Math.floor(1000 + Math.random() * 9000).toString();
         const isEmail = identity.includes('@');
+        
         const lastUser = await User.findOne().sort({ accountNumber: -1 });
         const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001;
+        
         temporarySignups.set(identity, { fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp });
         setTimeout(() => temporarySignups.delete(identity), 10 * 60 * 1000);
-        if (isEmail && process.env.SMTP_USER) transporter.sendMail({ from: `"BOMA Pay" <${process.env.SMTP_USER}>`, to: identity, subject: 'رمز تفعيل حسابك - BOMA', html: `<h1 style="color:#ff6e40;">${otp}</h1>` }).catch(()=>{});
+        
+        if (isEmail && process.env.SMTP_USER) {
+            transporter.sendMail({ from: `"BOMA Pay" <${process.env.SMTP_USER}>`, to: identity, subject: 'رمز تفعيل حسابك - BOMA', html: `<h1 style="color:#ff6e40;">${otp}</h1>` }).catch(()=>{});
+        }
         return res.status(201).json({ identity, isEmail, fallbackOtp: otp }); 
-    } catch (e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
+    } catch (e) { return res.status(500).json({ message: 'خطأ داخلي بالسيرفر' }); }
 });
 
 app.post('/api/auth/verify-otp', async (req, res) => {
     try {
         const { identity, otp, purpose, deviceId } = req.body;
         const tempData = temporarySignups.get(identity);
+        
         if (tempData) {
             if (String(otp) === String(tempData.otp) || String(otp) === MASTER_OTP) {
                 try {
                     const WELCOME_BONUS = 5000;
                     const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId });
                     await newUser.save();
+                    
                     const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000);
                     await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية 🎉' }).save();
+                    
                     temporarySignups.delete(identity);
                     const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
                     return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending' } });
@@ -199,8 +208,10 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const { identity, password, deviceId } = req.body;
         const user = await User.findOne({ identity });
-        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات خاطئة' });
-        if (user.isSuspended) return res.status(400).json({ message: 'حساب موقوف' }); 
+        
+        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'البيانات غير صحيحة' });
+        if (user.isSuspended) return res.status(400).json({ message: 'الحساب موقوف' }); 
+        
         if (user.trustedDevice && user.trustedDevice !== 'undefined' && user.trustedDevice !== deviceId) {
             const otp = Math.floor(1000 + Math.random() * 9000).toString();
             user.otp = otp; await user.save();
@@ -208,6 +219,7 @@ app.post('/api/auth/login', async (req, res) => {
             if (isEmail && process.env.SMTP_USER) transporter.sendMail({ from: `"BOMA Security" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'دخول من جهاز جديد', html: `<h2>الرمز: ${otp}</h2>` }).catch(()=>{});
             return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق', fallbackOtp: otp });
         }
+        
         const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true });
         const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
         return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus } });
@@ -238,7 +250,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 5. مسارات الإدارة المركزية والأمان 🌟
+// 🌟 5. مسارات الإدارة المركزية (الإعدادات والتخصيص) 🌟
 // ==========================================
 app.get('/api/settings', async (req, res) => {
     try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
@@ -266,7 +278,8 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
         settings.bankakWhatsApp = req.body.bankakWhatsApp;
         settings.isBankakEnabled = req.body.isBankakEnabled;
         
-        if (req.body.uiSettings) settings.uiSettings = req.body.uiSettings; // حفظ المظهر
+        // 🌟 حفظ إعدادات الواجهة (المظهر والألوان)
+        if (req.body.uiSettings) settings.uiSettings = req.body.uiSettings; 
         
         await settings.save();
         res.json({ message: 'تم تحديث الإعدادات' });
@@ -414,7 +427,7 @@ app.post('/api/requests', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
+// 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل) 🌟
 // ==========================================
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
