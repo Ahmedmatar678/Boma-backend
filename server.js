@@ -16,7 +16,7 @@ app.use(cors({
 }));
 
 // ==========================================
-// 🌟 1. نماذج الإعدادات المركزية 🌟
+// 🌟 1. نماذج الإعدادات المركزية (بما فيها المظهر والشروط) 🌟
 // ==========================================
 const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isTransferEnabled: { type: Boolean, default: true },
@@ -37,8 +37,8 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     adminPasswordHash: { type: String, default: '' },
     adminEmail: { type: String, default: 'admin@boma.com' },
 
-    termsText: { type: String, default: '' }, // 🌟 حفظ الشروط والخصوصية
-    uiSettings: { type: Object, default: {} } // 🌟 حفظ ألوان وتخصيصات المظهر
+    termsText: { type: String, default: '' }, // حفظ الشروط والخصوصية
+    uiSettings: { type: Object, default: {} } // حفظ تخصيصات المظهر بالكامل (الألوان والأزرار)
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
@@ -83,7 +83,7 @@ function isAdminAccount(user) {
 }
 
 // ==========================================
-// 🌟 2. النماذج الأساسية 🌟
+// 🌟 2. النماذج الأساسية (العملاء، المنتجات، المحفظة) 🌟
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
@@ -113,7 +113,7 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ cl
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 
 // ==========================================
-// 🌟 3. حراس الأمان 🌟
+// 🌟 3. حراس الأمان (Middlewares) 🌟
 // ==========================================
 const auth = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -143,7 +143,7 @@ const adminAuth = async (req, res, next) => {
 };
 
 // ==========================================
-// 🌟 4. التوثيق والمصادقة للعملاء 🌟
+// 🌟 4. مسارات التوثيق للعملاء 🌟
 // ==========================================
 app.post('/api/auth/signup', async (req, res) => {
     try {
@@ -238,7 +238,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 5. مسارات الإدارة والأمان (مع الشروط والتخصيص) 🌟
+// 🌟 5. مسارات الإدارة المركزية والأمان 🌟
 // ==========================================
 app.get('/api/settings', async (req, res) => {
     try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
@@ -254,11 +254,13 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
     try { 
         let settings = await AppSettings.findOne();
         if(!settings) settings = new AppSettings();
+        
         settings.isTransferEnabled = req.body.isTransferEnabled;
         settings.isWithdrawEnabled = req.body.isWithdrawEnabled;
         settings.isDepositEnabled = req.body.isDepositEnabled;
         settings.isStoreEnabled = req.body.isStoreEnabled;
         settings.isServicesEnabled = req.body.isServicesEnabled;
+        
         settings.bankakAccount = req.body.bankakAccount;
         settings.bankakName = req.body.bankakName;
         settings.bankakWhatsApp = req.body.bankakWhatsApp;
