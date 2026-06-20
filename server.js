@@ -16,7 +16,7 @@ app.use(cors({
 }));
 
 // ==========================================
-// 🌟 1. نماذج الإعدادات، الأقسام، والإعلانات 🌟
+// 🌟 1. نماذج الإعدادات المركزية 🌟
 // ==========================================
 const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isTransferEnabled: { type: Boolean, default: true },
@@ -35,7 +35,10 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     isDecorationActive: { type: Boolean, default: false },
 
     adminPasswordHash: { type: String, default: '' },
-    adminEmail: { type: String, default: 'admin@boma.com' }
+    adminEmail: { type: String, default: 'admin@boma.com' },
+
+    termsText: { type: String, default: '' }, // 🌟 حفظ الشروط والخصوصية
+    uiSettings: { type: Object, default: {} } // 🌟 حفظ ألوان وتخصيصات المظهر
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
@@ -80,7 +83,7 @@ function isAdminAccount(user) {
 }
 
 // ==========================================
-// 🌟 2. النماذج الأساسية (العملاء، المنتجات، المحفظة) 🌟
+// 🌟 2. النماذج الأساسية 🌟
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
@@ -99,17 +102,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({
 }));
 
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
-
-// 🌟 التحديث هنا: إضافة clientName لطلبات الخدمات 🌟
-const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ 
-    serviceName: String, 
-    projectName: String, 
-    description: String, 
-    clientIdentity: String, 
-    clientName: String, 
-    date: { type: Date, default: Date.now } 
-}));
-
+const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
@@ -120,7 +113,7 @@ const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ cl
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
 
 // ==========================================
-// 🌟 3. حراس الأمان (Middlewares) 🌟
+// 🌟 3. حراس الأمان 🌟
 // ==========================================
 const auth = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
@@ -150,7 +143,7 @@ const adminAuth = async (req, res, next) => {
 };
 
 // ==========================================
-// 🌟 4. مسارات التوثيق للعملاء 🌟
+// 🌟 4. التوثيق والمصادقة للعملاء 🌟
 // ==========================================
 app.post('/api/auth/signup', async (req, res) => {
     try {
@@ -245,7 +238,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ==========================================
-// 🌟 5. مسارات الإدارة المركزية والأمان 🌟
+// 🌟 5. مسارات الإدارة والأمان (مع الشروط والتخصيص) 🌟
 // ==========================================
 app.get('/api/settings', async (req, res) => {
     try { const settings = await AppSettings.findOne(); res.json(settings || {}); } 
@@ -270,6 +263,9 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
         settings.bankakName = req.body.bankakName;
         settings.bankakWhatsApp = req.body.bankakWhatsApp;
         settings.isBankakEnabled = req.body.isBankakEnabled;
+        
+        if (req.body.uiSettings) settings.uiSettings = req.body.uiSettings; // حفظ المظهر
+        
         await settings.save();
         res.json({ message: 'تم تحديث الإعدادات' });
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
@@ -283,6 +279,13 @@ app.put('/api/admin/settings/decorations', adminAuth, async (req, res) => {
             isDecorationActive: req.body.isDecorationActive 
         });
         res.json({ message: 'تم' });
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
+app.put('/api/admin/settings/terms', adminAuth, async (req, res) => {
+    try {
+        await AppSettings.findOneAndUpdate({}, { termsText: req.body.termsText });
+        res.json({ message: 'تم التحديث' });
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
@@ -351,18 +354,12 @@ app.post('/api/support', auth, async (req, res) => {
         res.json({ message: 'تم الإرسال' }); 
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
-
 app.get('/api/support', auth, async (req, res) => { 
-    try { 
-        const user = await User.findById(req.user._id); 
-        res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); 
-    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+    try { const user = await User.findById(req.user._id); res.json(await Ticket.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
-
 app.get('/api/admin/support', adminAuth, async (req, res) => { 
     try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
-
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { 
     try { 
         const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); 
