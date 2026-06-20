@@ -30,7 +30,7 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     bankakWhatsApp: { type: String, default: '' },
     isBankakEnabled: { type: Boolean, default: true },
 
-    decorationType: { type: String, default: 'none' }, // none, ramadan, eid-adha, eid-fitr, custom
+    decorationType: { type: String, default: 'none' }, 
     decorationCustomUrl: { type: String, default: '' },
     isDecorationActive: { type: Boolean, default: false },
 
@@ -47,8 +47,8 @@ const Category = mongoose.model('Category', new mongoose.Schema({
 const Announcement = mongoose.model('Announcement', new mongoose.Schema({
     title: String,
     message: String,
-    type: String, // popup, notification
-    count: String, // 1, 3, always
+    type: String, 
+    count: String, 
     date: { type: Date, default: Date.now }
 }));
 
@@ -99,7 +99,17 @@ const Product = mongoose.model('Product', new mongoose.Schema({
 }));
 
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
-const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, date: { type: Date, default: Date.now } }));
+
+// 🌟 التحديث هنا: إضافة clientName لطلبات الخدمات 🌟
+const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ 
+    serviceName: String, 
+    projectName: String, 
+    description: String, 
+    clientIdentity: String, 
+    clientName: String, 
+    date: { type: Date, default: Date.now } 
+}));
+
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
@@ -313,13 +323,11 @@ app.post('/api/admin/forgot-password', async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); }
 });
 
-// الإعلانات والتنبيهات
 app.get('/api/announcements', async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.get('/api/admin/announcements', adminAuth, async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/announcements', adminAuth, async (req, res) => { try { await new Announcement(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/announcements/:id', adminAuth, async (req, res) => { try { await Announcement.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
-// الأقسام الديناميكية
 app.get('/api/categories', async (req, res) => { try { res.json(await Category.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -334,24 +342,16 @@ app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User
 app.put('/api/users/:id/kyc', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { kycStatus: req.body.kycStatus }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 // ==========================================
-// 🌟 6. مسارات الدعم الفني (للعميل والإدارة) 🌟
+// 🌟 6. مسارات الدعم الفني 🌟
 // ==========================================
-
-// مسار إرسال التذكرة للعميل
 app.post('/api/support', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
-        await new Ticket({ 
-            clientIdentity: user.identity, 
-            clientName: user.fullName, 
-            subject: req.body.subject, 
-            message: req.body.message 
-        }).save(); 
+        await new Ticket({ clientIdentity: user.identity, clientName: user.fullName, subject: req.body.subject, message: req.body.message }).save(); 
         res.json({ message: 'تم الإرسال' }); 
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// مسار استعراض تذاكر العميل
 app.get('/api/support', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
@@ -359,25 +359,14 @@ app.get('/api/support', auth, async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// مسار الدعم الفني للإدارة
 app.get('/api/admin/support', adminAuth, async (req, res) => { 
     try { res.json(await Ticket.find().sort({ date: -1 })); } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 تحديث مسار الرد: الإشعار سيحتوي على نص الرد الفعلي 🌟
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => { 
     try { 
-        const ticket = await Ticket.findByIdAndUpdate(req.params.id, { 
-            adminReply: req.body.reply, 
-            status: 'replied' 
-        }, { new: true }); 
-        
-        await new Notification({ 
-            clientIdentity: ticket.clientIdentity, 
-            title: 'رد الدعم الفني', 
-            message: `الرد: ${req.body.reply}`  // تم التحديث هنا ليظهر نص الرد 
-        }).save(); 
-        
+        const ticket = await Ticket.findByIdAndUpdate(req.params.id, { adminReply: req.body.reply, status: 'replied' }, { new: true }); 
+        await new Notification({ clientIdentity: ticket.clientIdentity, title: 'رد الدعم الفني', message: `الرد: ${req.body.reply}` }).save(); 
         res.json({ message: 'تم' }); 
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
