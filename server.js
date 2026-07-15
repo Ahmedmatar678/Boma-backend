@@ -38,7 +38,7 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     adminEmail: { type: String, default: 'admin@boma.com' },
 
     termsText: { type: String, default: '' }, 
-    uiSettings: { type: Object, default: {} } // تخزين جميع خصائص الواجهة والألوان
+    uiSettings: { type: Object, default: {} } 
 }));
 
 const Category = mongoose.model('Category', new mongoose.Schema({
@@ -55,7 +55,14 @@ const Announcement = mongoose.model('Announcement', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
-// إعدادات اتصال متقدمة لتجنب انقطاع السيرفر المجاني
+// نموذج كوبونات الخصم
+const PromoCode = mongoose.model('PromoCode', new mongoose.Schema({
+    code: { type: String, unique: true, required: true },
+    discountPercentage: { type: Number, required: true },
+    isActive: { type: Boolean, default: true },
+    date: { type: Date, default: Date.now }
+}));
+
 mongoose.connect(process.env.MONGO_URI, {
     serverSelectionTimeoutMS: 30000, 
     socketTimeoutMS: 45000,
@@ -98,7 +105,8 @@ const User = mongoose.model('User', new mongoose.Schema({
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 },
-    trustedDevice: { type: String, default: '' }, tokenVersion: { type: Number, default: 0 }
+    trustedDevice: { type: String, default: '' }, tokenVersion: { type: Number, default: 0 },
+    wishlist: { type: [String], default: [] } // حقل المفضلة لتخزين المنتجات
 }));
 
 const Product = mongoose.model('Product', new mongoose.Schema({ 
@@ -356,6 +364,11 @@ app.get('/api/categories', async (req, res) => { try { res.json(await Category.f
 app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
+// مسارات إدارة الكوبونات
+app.get('/api/admin/promocodes', adminAuth, async (req, res) => { try { res.json(await PromoCode.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.post('/api/admin/promocodes', adminAuth, async (req, res) => { try { await new PromoCode(req.body).save(); res.status(201).json({message:'تم الإضافة'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+app.delete('/api/admin/promocodes/:id', adminAuth, async (req, res) => { try { await PromoCode.findByIdAndDelete(req.params.id); res.json({message:'تم الحذف'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
+
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -399,6 +412,16 @@ app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Ord
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
+// مسار جلب طلبات العميل الحالية
+app.get('/api/my-orders', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
+        const orders = await Order.find({ clientIdentity: user.identity }).sort({ date: -1 });
+        res.json(orders);
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
+});
+
 app.post('/api/orders', async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne();
@@ -411,6 +434,15 @@ app.post('/api/orders', async (req, res) => {
         for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); }
         res.status(201).json({ message: 'تم' }); 
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+// مسار التحقق من الكوبون للعميل
+app.post('/api/promocodes/validate', async (req, res) => {
+    try {
+        const promo = await PromoCode.findOne({ code: req.body.code, isActive: true });
+        if (!promo) return res.status(400).json({ message: 'الكوبون غير صالح أو منتهي' });
+        res.json({ discountPercentage: promo.discountPercentage });
+    } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); }
 });
 
 app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
@@ -436,6 +468,17 @@ app.post('/api/requests', async (req, res) => {
 // ==========================================
 // 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
+// مسار حفظ ومزامنة المفضلة للعميل
+app.post('/api/user/wishlist', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if(!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
+        user.wishlist = req.body.wishlist || [];
+        await user.save();
+        res.json({ message: 'تم المزامنة بنجاح' });
+    } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); }
+});
+
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
