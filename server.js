@@ -55,7 +55,7 @@ const Announcement = mongoose.model('Announcement', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
-// نموذج كوبونات الخصم
+// إضافة نموذج كوبونات الخصم (للمرحلة الأولى)
 const PromoCode = mongoose.model('PromoCode', new mongoose.Schema({
     code: { type: String, unique: true, required: true },
     discountPercentage: { type: Number, required: true },
@@ -412,16 +412,6 @@ app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Ord
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// مسار جلب طلبات العميل الحالية
-app.get('/api/my-orders', auth, async (req, res) => {
-    try {
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(404).json({ message: 'المستخدم غير موجود' });
-        const orders = await Order.find({ clientIdentity: user.identity }).sort({ date: -1 });
-        res.json(orders);
-    } catch(e) { res.status(500).json({ message: 'خطأ' }); }
-});
-
 app.post('/api/orders', async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne();
@@ -468,7 +458,7 @@ app.post('/api/requests', async (req, res) => {
 // ==========================================
 // 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
-// مسار حفظ ومزامنة المفضلة للعميل
+// مسار حفظ ومزامنة المفضلة للعميل (المرحلة الأولى)
 app.post('/api/user/wishlist', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
