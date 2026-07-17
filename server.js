@@ -108,8 +108,12 @@ const User = mongoose.model('User', new mongoose.Schema({
     wishlist: { type: [String], default: [] } 
 }));
 
+// 🌟 الجديد: إضافة vendorIdentity و minPrice للمنتجات 🌟
 const Product = mongoose.model('Product', new mongoose.Schema({ 
-    catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, 
+    catIdx: Number, categoryId: String, arName: String, enName: String, 
+    price: Number, 
+    minPrice: { type: Number, default: 0 }, 
+    vendorIdentity: { type: String, default: 'admin' }, 
     stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, 
     arDesc: String, enDesc: String, variations: { type: [String], default: [] }, 
     ratings: [{ rating: Number, clientIdentity: String }] 
@@ -118,7 +122,6 @@ const Product = mongoose.model('Product', new mongoose.Schema({
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
-// تحديث نموذج الطلب لإضافة كود الخصم إن وجد
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
@@ -201,7 +204,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
                     
                     temporarySignups.delete(identity);
                     const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-                    // تحديث: إرسال المحفوظات
                     return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', wishlist: newUser.wishlist || [] } });
                 } catch (saveErr) { return res.status(400).json({ message: 'مسجل مسبقاً' }); }
             } else return res.status(400).json({ message: 'رمز خاطئ' });
@@ -214,7 +216,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' });
             const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '', otp: null }, $inc: { tokenVersion: 1 } }, { new: true });
             const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-            // تحديث: إرسال المحفوظات
             return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
         }
         return res.status(400).json({ message: 'رمز خاطئ' });
@@ -239,7 +240,6 @@ app.post('/api/auth/login', async (req, res) => {
         
         const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true });
         const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-        // تحديث: إرسال المحفوظات عند الدخول
         return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
@@ -367,7 +367,6 @@ app.get('/api/categories', async (req, res) => { try { res.json(await Category.f
 app.post('/api/admin/categories', adminAuth, async (req, res) => { try { await new Category(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/categories/:id', adminAuth, async (req, res) => { try { await Category.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
-// مسارات إدارة الكوبونات
 app.get('/api/admin/promocodes', adminAuth, async (req, res) => { try { res.json(await PromoCode.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/promocodes', adminAuth, async (req, res) => { try { await new PromoCode(req.body).save(); res.status(201).json({message:'تم الإضافة'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/promocodes/:id', adminAuth, async (req, res) => { try { await PromoCode.findByIdAndDelete(req.params.id); res.json({message:'تم الحذف'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -406,7 +405,7 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => {
 });
 
 // ==========================================
-// 🌟 7. المتجر والتوصيل والطلبات والبنرات 🌟
+// 🌟 7. المتجر والتوصيل والطلبات 🌟
 // ==========================================
 app.get('/api/delivery-zones', async (req, res) => { try { res.json(await DeliveryZone.find()); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -429,7 +428,6 @@ app.post('/api/orders', async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// مسار التحقق من الكوبون للعميل
 app.post('/api/promocodes/validate', async (req, res) => {
     try {
         const promo = await PromoCode.findOne({ code: req.body.code, isActive: true });
@@ -443,6 +441,47 @@ app.post('/api/products', adminAuth, async (req, res) => { try{ await new Produc
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products/:id/rate', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ message: 'غير موجود' }); const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity); if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); } await product.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// ==========================================
+// 🌟 الجديد: مسار المفاوض الذكي (AI Negotiator) 🌟
+// ==========================================
+app.post('/api/negotiate', auth, async (req, res) => {
+    try {
+        const { productId, offerPrice } = req.body;
+        const product = await Product.findById(productId);
+        if (!product) return res.status(404).json({ message: "المنتج غير موجود" });
+
+        const base = product.price;
+        const min = product.minPrice > 0 ? product.minPrice : base; 
+
+        if (offerPrice >= base) {
+            return res.json({ status: 'accepted', finalPrice: offerPrice, message: 'مبروك! السعر ممتاز، تم قبول عرضك 🤝' });
+        }
+
+        if (offerPrice < min) {
+            const counterOffer = min + (base - min) * 0.3; 
+            return res.json({
+                status: 'counter',
+                finalPrice: Math.round(counterOffer),
+                message: `يا غالي السعر دا بعيد شوية، المنتج دا أصلي ومضمون. رأيك شنو في ${Math.round(counterOffer)} SDG؟ 😉`
+            });
+        }
+
+        const margin = base - min;
+        if (offerPrice >= min + (margin * 0.5)) {
+            return res.json({ status: 'accepted', finalPrice: offerPrice, message: 'حبابك عشرة! اتفقنا على السعر، مبروك عليك 🎉' });
+        } else {
+            const counterOffer = offerPrice + (margin * 0.2);
+            return res.json({
+                status: 'counter',
+                finalPrice: Math.round(counterOffer),
+                message: `قربنا نصل لاتفاق! زيدها شوية لتكون ${Math.round(counterOffer)} SDG ونقفل البيعة. رأيك؟`
+            });
+        }
+    } catch (e) {
+        res.status(500).json({ message: "حدث خطأ في نظام التفاوض" });
+    }
+});
 
 // البنرات والسلايدر
 app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
@@ -461,8 +500,6 @@ app.post('/api/requests', async (req, res) => {
 // ==========================================
 // 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
-
-// مسار حفظ ومزامنة المفضلة للعميل
 app.post('/api/user/wishlist', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
@@ -595,6 +632,7 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
+// 🌟 الجديد: التقسيم اللحظي للأموال (Smart Split Payments) داخل مسار الشراء 🌟
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne();
@@ -612,13 +650,51 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون توصيل');
         
-        // تحديث: تم إضافة حقل لحفظ الكود الترويجي في قاعدة البيانات
         await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء من المتجر' }).save(); 
         
-        for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); }
+        let platformTotalCommission = 0;
+
+        for(let item of cartItems) { 
+            const product = await Product.findById(item.id);
+            if(product) {
+                const finalItemPrice = item.price; 
+                if(product.minPrice > 0 && finalItemPrice < product.minPrice) {
+                    return res.status(400).json({ message: `السعر المدخل للمنتج ${product.arName} غير مصرح به.` });
+                }
+
+                product.stock -= (item.qty || 1);
+                await product.save();
+
+                if (product.vendorIdentity && product.vendorIdentity !== 'admin') {
+                    const vendor = await User.findOne({ identity: product.vendorIdentity });
+                    if (vendor) {
+                        const totalItemRevenue = finalItemPrice * (item.qty || 1);
+                        const commission = totalItemRevenue * 0.05; // خصم نسبة بومة 5%
+                        const vendorNet = totalItemRevenue - commission;
+
+                        platformTotalCommission += commission;
+
+                        vendor.balance += vendorNet;
+                        await vendor.save();
+
+                        await new Transaction({ 
+                            transactionId: txnId, clientIdentity: vendor.identity, type: 'in', 
+                            amount: vendorNet, title: `مبيعات: ${product.arName} (بعد خصم العمولة)` 
+                        }).save();
+                        await new Notification({ 
+                            clientIdentity: vendor.identity, title: 'مبيعات جديدة 💰', 
+                            message: `تم بيع ${item.qty || 1} من ${product.arName} وتم إضافة ${vendorNet} SDG لمحفظتك.` 
+                        }).save();
+                    }
+                }
+            } 
+        }
+
         res.json({ newBalance: user.balance - user.frozenBalance }); 
-    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+    } catch (e) { 
+        res.status(500).json({ message: 'خطأ في معالجة الدفع' }); 
+    } 
 });
 
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
