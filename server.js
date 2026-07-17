@@ -55,7 +55,6 @@ const Announcement = mongoose.model('Announcement', new mongoose.Schema({
     date: { type: Date, default: Date.now }
 }));
 
-// إضافة نموذج كوبونات الخصم (للمرحلة الأولى)
 const PromoCode = mongoose.model('PromoCode', new mongoose.Schema({
     code: { type: String, unique: true, required: true },
     discountPercentage: { type: Number, required: true },
@@ -106,7 +105,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 },
     trustedDevice: { type: String, default: '' }, tokenVersion: { type: Number, default: 0 },
-    wishlist: { type: [String], default: [] } // حقل المفضلة لتخزين المنتجات
+    wishlist: { type: [String], default: [] } 
 }));
 
 const Product = mongoose.model('Product', new mongoose.Schema({ 
@@ -119,7 +118,8 @@ const Product = mongoose.model('Product', new mongoose.Schema({
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
-const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
+// تحديث نموذج الطلب لإضافة كود الخصم إن وجد
+const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
@@ -201,7 +201,8 @@ app.post('/api/auth/verify-otp', async (req, res) => {
                     
                     temporarySignups.delete(identity);
                     const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-                    return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending' } });
+                    // تحديث: إرسال المحفوظات
+                    return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', wishlist: newUser.wishlist || [] } });
                 } catch (saveErr) { return res.status(400).json({ message: 'مسجل مسبقاً' }); }
             } else return res.status(400).json({ message: 'رمز خاطئ' });
         }
@@ -213,7 +214,8 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' });
             const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '', otp: null }, $inc: { tokenVersion: 1 } }, { new: true });
             const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-            return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus } });
+            // تحديث: إرسال المحفوظات
+            return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
         }
         return res.status(400).json({ message: 'رمز خاطئ' });
     } catch (e) { return res.status(500).json({ message: `خطأ` }); }
@@ -237,7 +239,8 @@ app.post('/api/auth/login', async (req, res) => {
         
         const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true });
         const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus } });
+        // تحديث: إرسال المحفوظات عند الدخول
+        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
@@ -458,7 +461,8 @@ app.post('/api/requests', async (req, res) => {
 // ==========================================
 // 🌟 8. مسارات المحفظة المالية (شحن، سحب، تحويل، دفع) 🌟
 // ==========================================
-// مسار حفظ ومزامنة المفضلة للعميل (المرحلة الأولى)
+
+// مسار حفظ ومزامنة المفضلة للعميل
 app.post('/api/user/wishlist', auth, async (req, res) => {
     try {
         const user = await User.findById(req.user._id);
@@ -596,7 +600,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         const settings = await AppSettings.findOne();
         if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، خدمات المتجر متوقفة مؤقتاً للصيانة' });
 
-        const { totalAmount, pin, cartItems, deliveryDetails } = req.body; 
+        const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
         if (totalAmount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
@@ -607,7 +611,9 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         user.balance -= totalAmount; await user.save(); 
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون توصيل');
-        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, paymentMethod: finalMethod }).save(); 
+        
+        // تحديث: تم إضافة حقل لحفظ الكود الترويجي في قاعدة البيانات
+        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء من المتجر' }).save(); 
         
         for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); }
