@@ -52,7 +52,6 @@ mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 30000, socke
 .then(async () => { console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!"); const settings = await AppSettings.findOne(); if (!settings) await new AppSettings().save(); })
 .catch(err => { console.error("❌ خطأ الاتصال:", err); process.exit(1); });
 
-// إعداد مرسل الإيميلات (Nodemailer)
 const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST || 'smtp.gmail.com', port: parseInt(process.env.SMTP_PORT || '587'), secure: false, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }, tls: { rejectUnauthorized: false } });
 
 // ==========================================
@@ -95,7 +94,7 @@ const adminAuth = async (req, res, next) => { const pass = req.headers['x-admin-
 const vendorAuth = async (req, res, next) => { await auth(req, res, async () => { const user = await User.findById(req.user._id); if (!user || user.role !== 'vendor') { return res.status(403).json({ message: 'وصول مرفوض' }); } req.vendorIdentity = user.identity; next(); }); };
 
 // ==========================================
-// 🌟 4. مسارات التوثيق وإرسال الـ OTP عبر الإيميل 🌟
+// 🌟 4. مسارات التوثيق والـ OTP 🌟
 // ==========================================
 app.post('/api/auth/signup', async (req, res) => { 
     try { 
@@ -193,7 +192,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 app.post('/api/auth/reset-password', async (req, res) => { try { const { identity, otp, newPassword } = req.body; const user = await User.findOne({ identity }); if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); user.password = await bcrypt.hash(newPassword, 10); user.otp = null; user.tokenVersion += 1; await user.save(); return res.json({message: 'تم التحديث'}); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
 
 // ==========================================
-// 🌟 5. مسارات الإدارة المركزية (الإعدادات والتخصيص) 🌟
+// 🌟 5. مسارات الإدارة المركزية وإحصائيات التنبيهات 🌟
 // ==========================================
 app.get('/api/settings', async (req, res) => { try { const settings = await AppSettings.findOne(); res.json(settings || {}); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/settings', adminAuth, async (req, res) => { try { const settings = await AppSettings.findOne(); res.json(settings || {}); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -233,7 +232,29 @@ app.get('/api/admin/promocodes', adminAuth, async (req, res) => { try { res.json
 app.post('/api/admin/promocodes', adminAuth, async (req, res) => { try { await new PromoCode(req.body).save(); res.status(201).json({message:'تم الإضافة'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/promocodes/:id', adminAuth, async (req, res) => { try { await PromoCode.findByIdAndDelete(req.params.id); res.json({message:'تم الحذف'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// 🔔 تحديث مسار الإحصائيات ليشمل حساب الطلبات المعلقة لنظام الرادار
+app.get('/api/admin/stats', adminAuth, async (req, res) => { 
+    try { 
+        const usersCount = await User.countDocuments() || 0; 
+        
+        // حساب الطلبات المعلقة الجديدة للتنبيهات
+        const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; 
+        const pendingDeposits = await FinanceRequest.countDocuments({ type: 'deposit', status: 'pending' }) || 0;
+        const pendingWithdraws = await FinanceRequest.countDocuments({ type: 'withdraw', status: 'pending' }) || 0;
+        const pendingTickets = await Ticket.countDocuments({ status: 'pending' }) || 0;
+
+        const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); 
+        const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; 
+        const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); 
+        const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; 
+        
+        res.json({ 
+            usersCount, totalUSD, totalSDG, 
+            pendingOrders, pendingDeposits, pendingWithdraws, pendingTickets 
+        }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
 
 app.post('/api/admin/factory-reset', adminAuth, async (req, res) => {
     try {
@@ -350,7 +371,7 @@ app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await Se
 app.post('/api/requests', async (req, res) => { try { await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
-// 🌟 8. مسارات المحفظة وإرسال رمز الـ PIN للإيميل 🌟
+// 🌟 8. مسارات المحفظة 🌟
 // ==========================================
 app.post('/api/user/wishlist', auth, async (req, res) => { try { const user = await User.findById(req.user._id); if(!user) return res.status(404).json({ message: 'المستخدم غير موجود' }); user.wishlist = req.body.wishlist || []; await user.save(); res.json({ message: 'تم المزامنة بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
