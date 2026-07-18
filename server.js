@@ -100,7 +100,7 @@ function isAdminAccount(user) {
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
-    role: { type: String, enum: ['user', 'vendor'], default: 'user' }, // 🌟 الجديد: نوع الحساب 🌟
+    role: { type: String, enum: ['user', 'vendor'], default: 'user' }, 
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
@@ -161,7 +161,6 @@ const adminAuth = async (req, res, next) => {
     } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
 };
 
-// 🌟 حارس أمان خاص بالتجار فقط 🌟
 const vendorAuth = async (req, res, next) => {
     await auth(req, res, async () => {
         const user = await User.findById(req.user._id);
@@ -389,7 +388,6 @@ app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCo
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// 🌟 مسار جديد: للإدارة لترقية/تخفيض حساب عميل إلى تاجر والعكس 🌟
 app.put('/api/admin/users/:id/role', adminAuth, async (req, res) => {
     try {
         const { role } = req.body;
@@ -691,7 +689,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
                     const vendor = await User.findOne({ identity: product.vendorIdentity });
                     if (vendor) {
                         const totalItemRevenue = finalItemPrice * (item.qty || 1);
-                        const commission = totalItemRevenue * 0.05; // خصم 5% نسبة منصة بومة
+                        const commission = totalItemRevenue * 0.07; 
                         const vendorNet = totalItemRevenue - commission;
 
                         platformTotalCommission += commission;
@@ -701,7 +699,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
 
                         await new Transaction({ 
                             transactionId: txnId, clientIdentity: vendor.identity, type: 'in', 
-                            amount: vendorNet, title: `مبيعات: ${product.arName} (بعد خصم العمولة)` 
+                            amount: vendorNet, title: `مبيعات: ${product.arName} (تم خصم 7% لرسوم المنصة)` 
                         }).save();
                         await new Notification({ 
                             clientIdentity: vendor.identity, title: 'مبيعات جديدة 💰', 
@@ -726,8 +724,6 @@ app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user
 // ==========================================
 // 🌟 9. مسارات لوحة التاجر (Vendor Panel) 🌟
 // ==========================================
-
-// أ) مسار للتاجر لإضافة منتج يخصه (يتم تعيين هويته تلقائياً)
 app.post('/api/vendor/products', vendorAuth, async (req, res) => {
     try {
         const productData = { ...req.body, vendorIdentity: req.vendorIdentity };
@@ -738,7 +734,6 @@ app.post('/api/vendor/products', vendorAuth, async (req, res) => {
     }
 });
 
-// ب) مسار للتاجر ليجلب منتجاته هو فقط
 app.get('/api/vendor/products', vendorAuth, async (req, res) => {
     try {
         const products = await Product.find({ vendorIdentity: req.vendorIdentity }).sort({ date: -1 });
@@ -748,7 +743,6 @@ app.get('/api/vendor/products', vendorAuth, async (req, res) => {
     }
 });
 
-// ج) مسار للتاجر ليعدل منتجه (يتأكد السيرفر أن المنتج يخص هذا التاجر)
 app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => {
     try {
         const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity });
@@ -761,7 +755,6 @@ app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => {
     }
 });
 
-// د) مسار للتاجر لحذف منتجه
 app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => {
     try {
         const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity });
@@ -774,11 +767,9 @@ app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => {
     }
 });
 
-// هـ) مسار لجلب إحصائيات التاجر (عدد المبيعات، المنتجات المضافة، الخ)
 app.get('/api/vendor/stats', vendorAuth, async (req, res) => {
     try {
         const productsCount = await Product.countDocuments({ vendorIdentity: req.vendorIdentity });
-        // البحث عن الحركات المالية الداخلة التي تخص المبيعات
         const salesTxs = await Transaction.find({ clientIdentity: req.vendorIdentity, type: 'in', title: { $regex: 'مبيعات' } });
         const totalSalesRevenue = salesTxs.reduce((sum, tx) => sum + tx.amount, 0);
         
@@ -787,7 +778,6 @@ app.get('/api/vendor/stats', vendorAuth, async (req, res) => {
         res.status(500).json({ message: 'خطأ داخلي' });
     }
 });
-
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 BOMA Server Secure Running on port ${PORT}`); });
