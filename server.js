@@ -100,6 +100,7 @@ function isAdminAccount(user) {
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
+    role: { type: String, enum: ['user', 'vendor'], default: 'user' }, // 🌟 الجديد: نوع الحساب 🌟
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
@@ -108,7 +109,6 @@ const User = mongoose.model('User', new mongoose.Schema({
     wishlist: { type: [String], default: [] } 
 }));
 
-// 🌟 الجديد: إضافة vendorIdentity و minPrice للمنتجات 🌟
 const Product = mongoose.model('Product', new mongoose.Schema({ 
     catIdx: Number, categoryId: String, arName: String, enName: String, 
     price: Number, 
@@ -116,7 +116,8 @@ const Product = mongoose.model('Product', new mongoose.Schema({
     vendorIdentity: { type: String, default: 'admin' }, 
     stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, 
     arDesc: String, enDesc: String, variations: { type: [String], default: [] }, 
-    ratings: [{ rating: Number, clientIdentity: String }] 
+    ratings: [{ rating: Number, clientIdentity: String }],
+    date: { type: Date, default: Date.now }
 }));
 
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
@@ -158,6 +159,18 @@ const adminAuth = async (req, res, next) => {
         if (!isValid) return res.status(403).json({ message: 'كلمة المرور خاطئة' });
         next();
     } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
+};
+
+// 🌟 حارس أمان خاص بالتجار فقط 🌟
+const vendorAuth = async (req, res, next) => {
+    await auth(req, res, async () => {
+        const user = await User.findById(req.user._id);
+        if (!user || user.role !== 'vendor') {
+            return res.status(403).json({ message: 'وصول مرفوض: هذه الميزة مخصصة للتجار فقط' });
+        }
+        req.vendorIdentity = user.identity;
+        next();
+    });
 };
 
 // ==========================================
@@ -204,7 +217,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
                     
                     temporarySignups.delete(identity);
                     const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-                    return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', wishlist: newUser.wishlist || [] } });
+                    return res.json({ message: 'تم التفعيل بنجاح', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', role: newUser.role, wishlist: newUser.wishlist || [] } });
                 } catch (saveErr) { return res.status(400).json({ message: 'مسجل مسبقاً' }); }
             } else return res.status(400).json({ message: 'رمز خاطئ' });
         }
@@ -216,7 +229,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
             if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' });
             const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '', otp: null }, $inc: { tokenVersion: 1 } }, { new: true });
             const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-            return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
+            return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } });
         }
         return res.status(400).json({ message: 'رمز خاطئ' });
     } catch (e) { return res.status(500).json({ message: `خطأ` }); }
@@ -240,7 +253,7 @@ app.post('/api/auth/login', async (req, res) => {
         
         const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true });
         const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' });
-        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, wishlist: updatedUser.wishlist || [] } });
+        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } });
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); }
 });
 
@@ -375,6 +388,19 @@ app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => 
 app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// 🌟 مسار جديد: للإدارة لترقية/تخفيض حساب عميل إلى تاجر والعكس 🌟
+app.put('/api/admin/users/:id/role', adminAuth, async (req, res) => {
+    try {
+        const { role } = req.body;
+        if (!['user', 'vendor'].includes(role)) return res.status(400).json({ message: 'صلاحية غير صحيحة' });
+        await User.findByIdAndUpdate(req.params.id, { role: role });
+        res.json({ message: 'تم تحديث صلاحية الحساب بنجاح' });
+    } catch(e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
 app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); try { const requestType = type === 'deposits' ? 'deposit' : 'withdraw'; const { status } = req.body; const request = await FinanceRequest.findById(id); if (!request || request.status !== 'pending') return res.status(400).json({ message: 'معالج مسبقاً' }); request.status = status; await request.save(); const user = await User.findOne({ identity: request.clientIdentity }); if (user) { const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000); if (requestType === 'deposit' && status === 'approved') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'شحن المحفظة (معتمد)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'شحن المحفظة', message: `تم إضافة ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'rejected') { user.balance += request.amount; await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: request.amount, title: 'استرداد (سحب مرفوض)' }).save(); await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم إرجاع ${request.amount} لحسابك.` }).save(); } else if (requestType === 'withdraw' && status === 'approved') { await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} إلى بنكك.` }).save(); } await user.save(); } res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/users/:id/manage', adminAuth, async (req, res) => { try { await User.findByIdAndUpdate(req.params.id, { isSuspended: req.body.isSuspended, frozenBalance: Number(req.body.frozenBalance) || 0 }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/users', adminAuth, async (req, res) => { try { res.json(await User.find().select('-password -pin').sort({ _id: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -436,15 +462,12 @@ app.post('/api/promocodes/validate', async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); }
 });
 
-app.get('/api/products', async (req, res) => { try{ res.json(await Product.find()); } catch(e){ res.status(500).json({message:'خطأ'}); } });
+app.get('/api/products', async (req, res) => { try{ res.json(await Product.find().sort({ date: -1 })); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products', adminAuth, async (req, res) => { try{ await new Product(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.put('/api/admin/products/:id', adminAuth, async (req, res) => { try { await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التحديث بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/products/:id', adminAuth, async (req, res) => { try{ await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/products/:id/rate', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const product = await Product.findById(req.params.id); if (!product) return res.status(404).json({ message: 'غير موجود' }); const existingIndex = product.ratings.findIndex(r => r.clientIdentity === user.identity); if (existingIndex !== -1) { product.ratings[existingIndex].rating = Number(req.body.rating); } else { product.ratings.push({ rating: Number(req.body.rating), clientIdentity: user.identity }); } await product.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// ==========================================
-// 🌟 الجديد: مسار المفاوض الذكي (AI Negotiator) 🌟
-// ==========================================
 app.post('/api/negotiate', auth, async (req, res) => {
     try {
         const { productId, offerPrice } = req.body;
@@ -483,7 +506,6 @@ app.post('/api/negotiate', auth, async (req, res) => {
     }
 });
 
-// البنرات والسلايدر
 app.get('/api/banners', async (req, res) => { try{ res.json(await Banner.find().sort({date:-1})); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.post('/api/banners', adminAuth, async (req, res) => { try{ await new Banner(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/banners/:id', adminAuth, async (req, res) => { try{ await Banner.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e){ res.status(500).json({message:'خطأ'}); } });
@@ -632,7 +654,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 الجديد: التقسيم اللحظي للأموال (Smart Split Payments) داخل مسار الشراء 🌟
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne();
@@ -670,7 +691,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
                     const vendor = await User.findOne({ identity: product.vendorIdentity });
                     if (vendor) {
                         const totalItemRevenue = finalItemPrice * (item.qty || 1);
-                        const commission = totalItemRevenue * 0.05; // خصم نسبة بومة 5%
+                        const commission = totalItemRevenue * 0.05; // خصم 5% نسبة منصة بومة
                         const vendorNet = totalItemRevenue - commission;
 
                         platformTotalCommission += commission;
@@ -701,6 +722,72 @@ app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user 
 app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// ==========================================
+// 🌟 9. مسارات لوحة التاجر (Vendor Panel) 🌟
+// ==========================================
+
+// أ) مسار للتاجر لإضافة منتج يخصه (يتم تعيين هويته تلقائياً)
+app.post('/api/vendor/products', vendorAuth, async (req, res) => {
+    try {
+        const productData = { ...req.body, vendorIdentity: req.vendorIdentity };
+        await new Product(productData).save();
+        res.status(201).json({ message: 'تم إضافة المنتج بنجاح' });
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
+// ب) مسار للتاجر ليجلب منتجاته هو فقط
+app.get('/api/vendor/products', vendorAuth, async (req, res) => {
+    try {
+        const products = await Product.find({ vendorIdentity: req.vendorIdentity }).sort({ date: -1 });
+        res.json(products);
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
+// ج) مسار للتاجر ليعدل منتجه (يتأكد السيرفر أن المنتج يخص هذا التاجر)
+app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => {
+    try {
+        const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity });
+        if (!product) return res.status(403).json({ message: 'غير مصرح بتعديل هذا المنتج' });
+        
+        await Product.findByIdAndUpdate(req.params.id, req.body);
+        res.json({ message: 'تم تعديل المنتج بنجاح' });
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
+// د) مسار للتاجر لحذف منتجه
+app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => {
+    try {
+        const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity });
+        if (!product) return res.status(403).json({ message: 'غير مصرح بحذف هذا المنتج' });
+        
+        await Product.findByIdAndDelete(req.params.id);
+        res.json({ message: 'تم حذف المنتج' });
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
+// هـ) مسار لجلب إحصائيات التاجر (عدد المبيعات، المنتجات المضافة، الخ)
+app.get('/api/vendor/stats', vendorAuth, async (req, res) => {
+    try {
+        const productsCount = await Product.countDocuments({ vendorIdentity: req.vendorIdentity });
+        // البحث عن الحركات المالية الداخلة التي تخص المبيعات
+        const salesTxs = await Transaction.find({ clientIdentity: req.vendorIdentity, type: 'in', title: { $regex: 'مبيعات' } });
+        const totalSalesRevenue = salesTxs.reduce((sum, tx) => sum + tx.amount, 0);
+        
+        res.json({ productsCount, totalSalesRevenue, salesCount: salesTxs.length });
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ داخلي' });
+    }
+});
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 BOMA Server Secure Running on port ${PORT}`); });
