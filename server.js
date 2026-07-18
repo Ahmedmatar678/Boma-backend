@@ -59,9 +59,10 @@ const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST || 
 // ==========================================
 const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
-    role: { type: String, enum: ['user', 'vendor'], default: 'user' }, 
+    role: { type: String, enum: ['user', 'vendor', 'courier'], default: 'user' }, 
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
+    debt: { type: Number, default: 0 }, 
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 },
     trustedDevice: { type: String, default: '' }, tokenVersion: { type: Number, default: 0 },
@@ -73,7 +74,7 @@ const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, 
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
-const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
+const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, courierIdentity: { type: String, default: '' }, deliveryOtp: { type: String, default: '' }, deliveryFee: { type: Number, default: 0 }, isPaid: { type: Boolean, default: false }, status: { type: String, default: 'pending' }, date: { type: Date, default: Date.now } }));
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
@@ -91,17 +92,16 @@ async function collectSystemFee(amount, title, txnId) { if (amount <= 0) return;
 // ==========================================
 function isValidPassword(password) {
     if (!password) return false;
-    // 8 أحرف وأرقام على الأقل
     const regex = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d@$!%*#?&]{8,32}$/;
     return regex.test(password);
 }
 
 function isValidPin(pin) {
-    if (!pin || !/^\d{6}$/.test(pin)) return false; // يجب أن يكون 6 أرقام فقط
-    if (pin.split('').every(char => char === pin[0])) return false; // منع 000000 أو 111111
+    if (!pin || !/^\d{6}$/.test(pin)) return false; 
+    if (pin.split('').every(char => char === pin[0])) return false; 
     const seqUp = '0123456789';
     const seqDown = '9876543210';
-    if (seqUp.includes(pin) || seqDown.includes(pin)) return false; // منع 123456 أو 654321
+    if (seqUp.includes(pin) || seqDown.includes(pin)) return false; 
     return true;
 }
 
@@ -111,6 +111,7 @@ function isValidPin(pin) {
 const auth = async (req, res, next) => { const token = req.headers['authorization']?.split(' ')[1]; if (!token) return res.status(401).json({ message: 'غير مصرح' }); try { const decoded = jwt.verify(token, JWT_SECRET); const user = await User.findById(decoded._id); if (!user || user.tokenVersion !== decoded.tokenVersion) return res.status(403).json({ message: 'جلسة منتهية' }); req.user = decoded; next(); } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); } };
 const adminAuth = async (req, res, next) => { const pass = req.headers['x-admin-pass']; if (!pass) return res.status(403).json({ message: 'وصول مرفوض' }); try { const settings = await AppSettings.findOne(); let isValid = false; if (settings && settings.adminPasswordHash) { isValid = await bcrypt.compare(pass, settings.adminPasswordHash); } else { isValid = (pass === (process.env.ADMIN_PASS || 'BomaAdmin2026')); } if (!isValid) return res.status(403).json({ message: 'كلمة المرور خاطئة' }); next(); } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); } };
 const vendorAuth = async (req, res, next) => { await auth(req, res, async () => { const user = await User.findById(req.user._id); if (!user || user.role !== 'vendor') { return res.status(403).json({ message: 'وصول مرفوض' }); } req.vendorIdentity = user.identity; next(); }); };
+const courierAuth = async (req, res, next) => { await auth(req, res, async () => { const user = await User.findById(req.user._id); if (!user || user.role !== 'courier') { return res.status(403).json({ message: 'وصول مرفوض' }); } req.courierIdentity = user.identity; next(); }); };
 
 // ==========================================
 // 🌟 4. مسارات التوثيق والـ OTP 🌟
@@ -119,7 +120,6 @@ app.post('/api/auth/signup', async (req, res) => {
     try { 
         const { fullName, identity, password, pin, termsAccepted } = req.body; 
         
-        // تطبيق حراس الأمان
         if (!isValidPassword(password)) return res.status(400).json({ message: 'كلمة المرور ضعيفة! يجب أن تتكون من 8 خانات وتحتوي على أحرف وأرقام معاً.' });
         if (!isValidPin(pin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب أن يكون 6 أرقام غير متطابقة أو متسلسلة.' });
 
@@ -293,7 +293,7 @@ app.post('/api/admin/factory-reset', adminAuth, async (req, res) => {
     try {
         const adminIdentities = ['infoboma0@gmail.com', 'ahmedwadmatar1996@gmail.com'];
         await User.deleteMany({ identity: { $nin: adminIdentities } });
-        await User.updateMany({ identity: { $in: adminIdentities } }, { $set: { balance: 0, frozenBalance: 0 } });
+        await User.updateMany({ identity: { $in: adminIdentities } }, { $set: { balance: 0, frozenBalance: 0, debt: 0 } });
         await Order.deleteMany({});
         await Transaction.deleteMany({});
         await FinanceRequest.deleteMany({});
@@ -309,7 +309,7 @@ app.post('/api/admin/factory-reset', adminAuth, async (req, res) => {
 
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.put('/api/admin/users/:id/role', adminAuth, async (req, res) => { try { const { role } = req.body; if (!['user', 'vendor'].includes(role)) return res.status(400).json({ message: 'صلاحية غير صحيحة' }); await User.findByIdAndUpdate(req.params.id, { role: role }); res.json({ message: 'تم تحديث صلاحية الحساب بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
+app.put('/api/admin/users/:id/role', adminAuth, async (req, res) => { try { const { role } = req.body; if (!['user', 'vendor', 'courier'].includes(role)) return res.status(400).json({ message: 'صلاحية غير صحيحة' }); await User.findByIdAndUpdate(req.params.id, { role: role }); res.json({ message: 'تم تحديث صلاحية الحساب بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 
 app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { 
     const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); 
@@ -551,17 +551,45 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
+        
+        // جلب رسوم التوصيل إن وجدت (ليتم احتسابها للمندوب لاحقاً)
+        const deliveryFee = Number(req.body.deliveryFee) || 0; 
+
         if (totalAmount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
         if (!(await bcrypt.compare(pin, user.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
         const availableBalance = user.balance - user.frozenBalance;
         if (!isAdminAccount(user) && availableBalance < totalAmount) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
+        
         user.balance -= totalAmount; await user.save(); 
+        
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون توصيل');
-        await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
+        
+        // إنشاء رمز OTP عشوائي من 4 أرقام لتسليم الطلب
+        const deliveryOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+        await new Order({ 
+            clientIdentity: user.identity, 
+            clientName: user.fullName, 
+            items: cartItems, 
+            totalAmount, 
+            deliveryFee: deliveryFee,
+            isPaid: true, // مدفوع مسبقاً من المحفظة
+            deliveryOtp: deliveryOtp,
+            promoCode: promoCode || '', 
+            paymentMethod: finalMethod 
+        }).save(); 
+        
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء من المتجر' }).save(); 
+        
+        // إرسال إشعار للعميل يحتوي على كود التوصيل السري
+        await new Notification({ 
+            clientIdentity: user.identity, 
+            title: 'تم تأكيد الطلب 🛒', 
+            message: `تم خصم ${totalAmount} SDG. رقم استلام الطلب الخاص بك للمندوب هو: ${deliveryOtp}` 
+        }).save();
         
         for(let item of cartItems) { 
             const product = await Product.findById(item.id);
@@ -601,6 +629,78 @@ app.get('/api/vendor/products', vendorAuth, async (req, res) => { try { const pr
 app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح بتعديل هذا المنتج' }); await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم تعديل المنتج بنجاح' }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح بحذف هذا المنتج' }); await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم حذف المنتج' }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 app.get('/api/vendor/stats', vendorAuth, async (req, res) => { try { const productsCount = await Product.countDocuments({ vendorIdentity: req.vendorIdentity }); const salesTxs = await Transaction.find({ clientIdentity: req.vendorIdentity, type: 'in', title: { $regex: 'مبيعات' } }); const totalSalesRevenue = salesTxs.reduce((sum, tx) => sum + tx.amount, 0); res.json({ productsCount, totalSalesRevenue, salesCount: salesTxs.length }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
+
+// ==========================================
+// 🌟 10. مسارات تطبيق المندوب (Courier Panel) 🌟
+// ==========================================
+app.get('/api/courier/orders/available', courierAuth, async (req, res) => { 
+    try { 
+        const orders = await Order.find({ status: 'pending', courierIdentity: '' }).sort({ date: -1 }); 
+        res.json(orders); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.get('/api/courier/orders/my', courierAuth, async (req, res) => { 
+    try { 
+        const orders = await Order.find({ courierIdentity: req.courierIdentity, status: 'shipping' }).sort({ date: -1 }); 
+        res.json(orders); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.put('/api/courier/orders/:id/accept', courierAuth, async (req, res) => { 
+    try { 
+        const order = await Order.findById(req.params.id); 
+        if (!order || order.status !== 'pending' || order.courierIdentity) return res.status(400).json({ message: 'الطلب غير متاح' }); 
+        
+        order.status = 'shipping'; 
+        order.courierIdentity = req.courierIdentity; 
+        await order.save(); 
+        
+        await new Notification({ clientIdentity: order.clientIdentity, title: 'طلبك في الطريق 🚚', message: 'قام مندوب التوصيل باستلام طلبك وهو في طريقه إليك الآن!' }).save(); 
+        res.json({ message: 'تم استلام الطلب بنجاح' }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.put('/api/courier/orders/:id/deliver', courierAuth, async (req, res) => { 
+    try { 
+        const { otp } = req.body; 
+        const order = await Order.findById(req.params.id); 
+        
+        if (!order || order.courierIdentity !== req.courierIdentity || order.status !== 'shipping') return res.status(400).json({ message: 'طلب غير صالح' }); 
+        if (order.deliveryOtp && order.deliveryOtp !== String(otp)) return res.status(400).json({ message: 'رمز الاستلام (OTP) غير صحيح' }); 
+
+        order.status = 'delivered'; 
+        await order.save(); 
+
+        const courier = await User.findOne({ identity: req.courierIdentity }); 
+        const txnId = 'DEL-' + Math.floor(10000000 + Math.random() * 90000000); 
+        
+        // إضافة رسوم التوصيل لمندوب التوصيل
+        if (order.deliveryFee && order.deliveryFee > 0) { 
+            courier.balance += order.deliveryFee; 
+            await new Transaction({ transactionId: txnId, clientIdentity: courier.identity, type: 'in', amount: order.deliveryFee, title: `أرباح توصيل طلب (${order._id.toString().slice(-4)})` }).save(); 
+        } 
+
+        // إذا كان الطلب كاش (الدفع عند الاستلام)، تسجل كمديونية على المندوب
+        if (!order.isPaid) { 
+            const platformDues = order.totalAmount - (order.deliveryFee || 0);
+            courier.debt += platformDues; 
+        } 
+
+        await courier.save(); 
+        await new Notification({ clientIdentity: order.clientIdentity, title: 'تم التوصيل بنجاح ✅', message: 'تم تسليم طلبك بنجاح. شكراً لتسوقك من بومة!' }).save(); 
+        
+        res.json({ message: 'تم التوصيل وإنهاء الطلب بنجاح' }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.get('/api/courier/stats', courierAuth, async (req, res) => { 
+    try { 
+        const courier = await User.findOne({ identity: req.courierIdentity }); 
+        const delivered = await Order.countDocuments({ courierIdentity: req.courierIdentity, status: 'delivered' }); 
+        res.json({ balance: courier.balance - courier.frozenBalance, debt: courier.debt || 0, deliveriesCount: delivered }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+});
 
 // ==========================================
 // 🌟 نظام الاستماع لرسائل البريد الإلكتروني (Bankak IMAP Listener) 🌟
