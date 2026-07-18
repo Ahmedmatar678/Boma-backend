@@ -87,6 +87,25 @@ function isAdminAccount(user) { if (!user || !user.identity) return false; const
 async function collectSystemFee(amount, title, txnId) { if (amount <= 0) return; const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' }); if (adminAccount) { adminAccount.balance += amount; await adminAccount.save(); await new Transaction({ transactionId: txnId, clientIdentity: adminAccount.identity, type: 'in', amount: amount, title: title }).save(); } }
 
 // ==========================================
+// 🛡️ دوال التحقق من قوة الحماية (Security Validations) 
+// ==========================================
+function isValidPassword(password) {
+    if (!password) return false;
+    // 8 أحرف وأرقام على الأقل
+    const regex = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d@$!%*#?&]{8,32}$/;
+    return regex.test(password);
+}
+
+function isValidPin(pin) {
+    if (!pin || !/^\d{6}$/.test(pin)) return false; // يجب أن يكون 6 أرقام فقط
+    if (pin.split('').every(char => char === pin[0])) return false; // منع 000000 أو 111111
+    const seqUp = '0123456789';
+    const seqDown = '9876543210';
+    if (seqUp.includes(pin) || seqDown.includes(pin)) return false; // منع 123456 أو 654321
+    return true;
+}
+
+// ==========================================
 // 🌟 3. حراس الأمان (Middlewares) 🌟
 // ==========================================
 const auth = async (req, res, next) => { const token = req.headers['authorization']?.split(' ')[1]; if (!token) return res.status(401).json({ message: 'غير مصرح' }); try { const decoded = jwt.verify(token, JWT_SECRET); const user = await User.findById(decoded._id); if (!user || user.tokenVersion !== decoded.tokenVersion) return res.status(403).json({ message: 'جلسة منتهية' }); req.user = decoded; next(); } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); } };
@@ -99,6 +118,11 @@ const vendorAuth = async (req, res, next) => { await auth(req, res, async () => 
 app.post('/api/auth/signup', async (req, res) => { 
     try { 
         const { fullName, identity, password, pin, termsAccepted } = req.body; 
+        
+        // تطبيق حراس الأمان
+        if (!isValidPassword(password)) return res.status(400).json({ message: 'كلمة المرور ضعيفة! يجب أن تتكون من 8 خانات وتحتوي على أحرف وأرقام معاً.' });
+        if (!isValidPin(pin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب أن يكون 6 أرقام غير متطابقة أو متسلسلة.' });
+
         const existingUser = await User.findOne({ identity }); 
         if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً' }); 
         
@@ -189,7 +213,18 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     } catch(e) { return res.status(500).json({message: 'خطأ'}); } 
 });
 
-app.post('/api/auth/reset-password', async (req, res) => { try { const { identity, otp, newPassword } = req.body; const user = await User.findOne({ identity }); if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); user.password = await bcrypt.hash(newPassword, 10); user.otp = null; user.tokenVersion += 1; await user.save(); return res.json({message: 'تم التحديث'}); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
+app.post('/api/auth/reset-password', async (req, res) => { 
+    try { 
+        const { identity, otp, newPassword } = req.body; 
+        if (!isValidPassword(newPassword)) return res.status(400).json({ message: 'كلمة المرور ضعيفة! يجب أن تتكون من 8 خانات وتحتوي على أحرف وأرقام معاً.' });
+
+        const user = await User.findOne({ identity }); 
+        if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); 
+        user.password = await bcrypt.hash(newPassword, 10); 
+        user.otp = null; user.tokenVersion += 1; await user.save(); 
+        return res.json({message: 'تم التحديث'}); 
+    } catch(e) { return res.status(500).json({message: 'خطأ'}); } 
+});
 
 // ==========================================
 // 🌟 5. مسارات الإدارة المركزية وإحصائيات التنبيهات 🌟
@@ -233,12 +268,10 @@ app.post('/api/admin/promocodes', adminAuth, async (req, res) => { try { await n
 app.delete('/api/admin/promocodes/:id', adminAuth, async (req, res) => { try { await PromoCode.findByIdAndDelete(req.params.id); res.json({message:'تم الحذف'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// 🔔 تحديث مسار الإحصائيات ليشمل حساب الطلبات المعلقة لنظام الرادار
 app.get('/api/admin/stats', adminAuth, async (req, res) => { 
     try { 
         const usersCount = await User.countDocuments() || 0; 
         
-        // حساب الطلبات المعلقة الجديدة للتنبيهات
         const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; 
         const pendingDeposits = await FinanceRequest.countDocuments({ type: 'deposit', status: 'pending' }) || 0;
         const pendingWithdraws = await FinanceRequest.countDocuments({ type: 'withdraw', status: 'pending' }) || 0;
@@ -399,7 +432,20 @@ app.post('/api/wallet/forgot-pin', auth, async (req, res) => {
     } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp, newPin } = req.body; const user = await User.findById(req.user._id); if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); user.pin = await bcrypt.hash(newPin, 10); user.otp = null; await user.save(); res.json({ message: 'تم تحديث PIN' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/wallet/reset-pin', auth, async (req, res) => { 
+    try { 
+        const { otp, newPin } = req.body; 
+        if (!isValidPin(newPin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب أن يكون 6 أرقام غير متطابقة أو متسلسلة.' });
+        
+        const user = await User.findById(req.user._id); 
+        if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); 
+        
+        user.pin = await bcrypt.hash(newPin, 10); 
+        user.otp = null; await user.save(); 
+        res.json({ message: 'تم تحديث PIN' }); 
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const receiver = await User.findOne({ accountNumber: accNum }); if (!receiver) return res.status(404).json({ message: 'غير موجود' }); if (receiver.isSuspended) return res.status(400).json({ message: 'موقوف' }); res.json({ name: receiver.fullName }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
