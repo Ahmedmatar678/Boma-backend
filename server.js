@@ -384,7 +384,33 @@ app.post('/api/admin/promocodes', adminAuth, async (req, res) => { try { await n
 app.delete('/api/admin/promocodes/:id', adminAuth, async (req, res) => { try { await PromoCode.findByIdAndDelete(req.params.id); res.json({message:'تم الحذف'}); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
 app.get('/api/admin/search-user/:accountNumber', adminAuth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const user = await User.findOne({ accountNumber: accNum }).select('-password -pin'); if (!user) return res.status(404).json({ message: 'لم يتم العثور' }); res.json(user); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
-app.get('/api/admin/stats', adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+app.get('/api/admin/stats', 
+// 🌟 مسار تصفير النظام (Factory Reset) للإطلاق الفعلي 🌟
+app.post('/api/admin/factory-reset', adminAuth, async (req, res) => {
+    try {
+        // هويات الإدارة التي يجب حمايتها من الحذف
+        const adminIdentities = ['infoboma0@gmail.com', 'ahmedwadmatar1996@gmail.com'];
+        
+        // 1. حذف جميع العملاء والتجار ما عدا حسابات الإدارة
+        await User.deleteMany({ identity: { $nin: adminIdentities } });
+        
+        // 2. تصفير الجداول التشغيلية بالكامل
+        await Order.deleteMany({});
+        await Transaction.deleteMany({});
+        await FinanceRequest.deleteMany({});
+        await Ticket.deleteMany({});
+        await Notification.deleteMany({});
+        await ServiceRequest.deleteMany({});
+        
+        // ملاحظة: لم نقم بحذف Product أو Category أو AppSettings بناءً على طلبك
+        
+        res.json({ message: 'تم تصفير النظام بنجاح! التطبيق الآن نظيف وجاهز للإطلاق الفعلي 🚀' });
+    } catch (e) {
+        res.status(500).json({ message: 'حدث خطأ أثناء التصفير' });
+    }
+});
+
+adminAuth, async (req, res) => { try { const usersCount = await User.countDocuments() || 0; const pendingOrders = await Order.countDocuments({ status: 'pending' }) || 0; const userAggr = await User.aggregate([{ $group: { _id: null, totalSDG: { $sum: "$balance" } } }]); const totalSDG = userAggr.length > 0 ? userAggr[0].totalSDG : 0; const depositAggr = await FinanceRequest.aggregate([{ $match: { type: 'deposit', status: 'approved' } }, { $group: { _id: null, totalUSD: { $sum: "$amount" } } }]); const totalUSD = depositAggr.length > 0 ? depositAggr[0].totalUSD : 0; res.json({ usersCount, totalUSD, totalSDG, pendingOrders }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { const txs = await Transaction.find({ clientIdentity: req.body.identity }).sort({ date: -1 }); res.json(txs); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
