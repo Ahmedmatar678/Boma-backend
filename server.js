@@ -4,6 +4,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
+const Imap = require('imap');
+const { simpleParser } = require('mailparser');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -29,7 +31,6 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     bankakWhatsApp: { type: String, default: '' },
     isBankakEnabled: { type: Boolean, default: true },
     
-    // 🌟 إعدادات الرسوم المالية الجديدة 🌟
     transferFeePct: { type: Number, default: 1 }, 
     withdrawFeePct: { type: Number, default: 2 },
     depositFeePct: { type: Number, default: 0 },
@@ -51,18 +52,8 @@ mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 30000, socke
 .then(async () => { console.log("✅ سيرفر بومة متصل بالسحابة بنجاح!"); const settings = await AppSettings.findOne(); if (!settings) await new AppSettings().save(); })
 .catch(err => { console.error("❌ خطأ الاتصال:", err); process.exit(1); });
 
+// إعداد مرسل الإيميلات (Nodemailer)
 const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST || 'smtp.gmail.com', port: parseInt(process.env.SMTP_PORT || '587'), secure: false, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }, tls: { rejectUnauthorized: false } });
-
-const temporarySignups = new Map();
-const MASTER_OTP = "1111"; 
-const DAILY_WITHDRAW_LIMIT = 500000;  
-const DAILY_DEPOSIT_LIMIT = 1000000;  
-
-function isAdminAccount(user) {
-    if (!user || !user.identity) return false;
-    const ident = String(user.identity).toLowerCase().trim();
-    return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com';
-}
 
 // ==========================================
 // 🌟 2. النماذج الأساسية للمستخدمين والعمليات 🌟
@@ -78,6 +69,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     wishlist: { type: [String], default: [] } 
 }));
 
+const BankakLog = mongoose.model('BankakLog', new mongoose.Schema({ txnId: { type: String, unique: true }, amount: Number, date: { type: Date, default: Date.now }, isUsed: { type: Boolean, default: false } }));
 const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, minPrice: { type: Number, default: 0 }, vendorIdentity: { type: String, default: 'admin' }, stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, arDesc: String, enDesc: String, variations: { type: [String], default: [] }, ratings: [{ rating: Number, clientIdentity: String }], date: { type: Date, default: Date.now } }));
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
@@ -86,46 +78,118 @@ const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: Stri
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
 const Ticket = mongoose.model('Ticket', new mongoose.Schema({ clientIdentity: String, clientName: String, subject: String, message: String, adminReply: { type: String, default: '' }, status: { type: String, enum: ['pending', 'replied', 'closed'], default: 'pending' }, date: { type: Date, default: Date.now } }));
-const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ clientIdentity: String, type: { type: String, enum: ['deposit', 'withdraw'] }, amount: Number, currency: { type: String, default: 'SDG' }, receipt: String, bankDetails: String, status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }, date: { type: Date, default: Date.now } }));
+const FinanceRequest = mongoose.model('FinanceRequest', new mongoose.Schema({ clientIdentity: String, type: { type: String, enum: ['deposit', 'withdraw'] }, amount: Number, currency: { type: String, default: 'SDG' }, receipt: String, bankTxnId: String, bankDetails: String, status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }, date: { type: Date, default: Date.now } }));
 
 const JWT_SECRET = process.env.JWT_SECRET || "BomaSuperSecretKey2026";
+const temporarySignups = new Map();
+const MASTER_OTP = "1111"; 
 
-// 🌟 دالة مساعدة لتجميع الرسوم في حساب الإدارة 🌟
-async function collectSystemFee(amount, title, txnId) {
-    if (amount <= 0) return;
-    const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' });
-    if (adminAccount) {
-        adminAccount.balance += amount;
-        await adminAccount.save();
-        await new Transaction({ transactionId: txnId, clientIdentity: adminAccount.identity, type: 'in', amount: amount, title: title }).save();
-    }
-}
+function isAdminAccount(user) { if (!user || !user.identity) return false; const ident = String(user.identity).toLowerCase().trim(); return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com'; }
+async function collectSystemFee(amount, title, txnId) { if (amount <= 0) return; const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' }); if (adminAccount) { adminAccount.balance += amount; await adminAccount.save(); await new Transaction({ transactionId: txnId, clientIdentity: adminAccount.identity, type: 'in', amount: amount, title: title }).save(); } }
 
 // ==========================================
 // 🌟 3. حراس الأمان (Middlewares) 🌟
 // ==========================================
-const auth = async (req, res, next) => {
-    const token = req.headers['authorization']?.split(' ')[1];
-    if (!token) return res.status(401).json({ message: 'غير مصرح' });
-    try { const decoded = jwt.verify(token, JWT_SECRET); const user = await User.findById(decoded._id); if (!user || user.tokenVersion !== decoded.tokenVersion) return res.status(403).json({ message: 'جلسة منتهية' }); req.user = decoded; next(); } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); }
-};
-
-const adminAuth = async (req, res, next) => {
-    const pass = req.headers['x-admin-pass']; if (!pass) return res.status(403).json({ message: 'وصول مرفوض' });
-    try { const settings = await AppSettings.findOne(); let isValid = false; if (settings && settings.adminPasswordHash) { isValid = await bcrypt.compare(pass, settings.adminPasswordHash); } else { isValid = (pass === (process.env.ADMIN_PASS || 'BomaAdmin2026')); } if (!isValid) return res.status(403).json({ message: 'كلمة المرور خاطئة' }); next(); } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); }
-};
-
-const vendorAuth = async (req, res, next) => {
-    await auth(req, res, async () => { const user = await User.findById(req.user._id); if (!user || user.role !== 'vendor') { return res.status(403).json({ message: 'وصول مرفوض' }); } req.vendorIdentity = user.identity; next(); });
-};
+const auth = async (req, res, next) => { const token = req.headers['authorization']?.split(' ')[1]; if (!token) return res.status(401).json({ message: 'غير مصرح' }); try { const decoded = jwt.verify(token, JWT_SECRET); const user = await User.findById(decoded._id); if (!user || user.tokenVersion !== decoded.tokenVersion) return res.status(403).json({ message: 'جلسة منتهية' }); req.user = decoded; next(); } catch(e) { return res.status(403).json({ message: 'جلسة منتهية' }); } };
+const adminAuth = async (req, res, next) => { const pass = req.headers['x-admin-pass']; if (!pass) return res.status(403).json({ message: 'وصول مرفوض' }); try { const settings = await AppSettings.findOne(); let isValid = false; if (settings && settings.adminPasswordHash) { isValid = await bcrypt.compare(pass, settings.adminPasswordHash); } else { isValid = (pass === (process.env.ADMIN_PASS || 'BomaAdmin2026')); } if (!isValid) return res.status(403).json({ message: 'كلمة المرور خاطئة' }); next(); } catch(e) { return res.status(500).json({ message: 'خطأ داخلي' }); } };
+const vendorAuth = async (req, res, next) => { await auth(req, res, async () => { const user = await User.findById(req.user._id); if (!user || user.role !== 'vendor') { return res.status(403).json({ message: 'وصول مرفوض' }); } req.vendorIdentity = user.identity; next(); }); };
 
 // ==========================================
-// 🌟 4. مسارات التوثيق (تسجيل، دخول، OTP) 🌟
+// 🌟 4. مسارات التوثيق وإرسال الـ OTP عبر الإيميل 🌟
 // ==========================================
-app.post('/api/auth/signup', async (req, res) => { try { const { fullName, identity, password, pin, termsAccepted } = req.body; const existingUser = await User.findOne({ identity }); if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً' }); const hashedPassword = await bcrypt.hash(password, 10); const hashedPin = await bcrypt.hash(pin, 10); const otp = Math.floor(1000 + Math.random() * 9000).toString(); const isEmail = identity.includes('@'); const lastUser = await User.findOne().sort({ accountNumber: -1 }); const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001; temporarySignups.set(identity, { fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp }); setTimeout(() => temporarySignups.delete(identity), 10 * 60 * 1000); if (isEmail && process.env.SMTP_USER) { transporter.sendMail({ from: `"BOMA Pay" <${process.env.SMTP_USER}>`, to: identity, subject: 'رمز تفعيل حسابك - BOMA', html: `<h1 style="color:#ff6e40;">${otp}</h1>` }).catch(()=>{}); } return res.status(201).json({ identity, isEmail, fallbackOtp: otp }); } catch (e) { return res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/auth/signup', async (req, res) => { 
+    try { 
+        const { fullName, identity, password, pin, termsAccepted } = req.body; 
+        const existingUser = await User.findOne({ identity }); 
+        if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً' }); 
+        
+        const hashedPassword = await bcrypt.hash(password, 10); 
+        const hashedPin = await bcrypt.hash(pin, 10); 
+        const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
+        const isEmail = identity.includes('@'); 
+        
+        const lastUser = await User.findOne().sort({ accountNumber: -1 }); 
+        const newAccountNumber = lastUser ? lastUser.accountNumber + 1 : 1000000001; 
+        temporarySignups.set(identity, { fullName, identity, password: hashedPassword, pin: hashedPin, termsAccepted, accountNumber: newAccountNumber, otp }); 
+        setTimeout(() => temporarySignups.delete(identity), 10 * 60 * 1000); 
+
+        if (isEmail) {
+            if (process.env.SMTP_USER) { 
+                transporter.sendMail({ 
+                    from: `"بومة BOMA" <${process.env.SMTP_USER}>`, 
+                    to: identity, 
+                    subject: 'رمز تفعيل حسابك - BOMA', 
+                    html: `<div style="font-family:sans-serif; text-align:center; padding:20px; background:#f8fafc; border-radius:12px; border:1px solid #e2e8f0;"><h2 style="color:#1e3d59; margin-bottom:10px;">مرحباً ${fullName}</h2><p style="color:#475569; font-size:16px;">رمز التفعيل الخاص بحسابك هو:</p><h1 style="color:#ff6e40; letter-spacing:5px; background:#fff; padding:15px; border-radius:8px; display:inline-block; border:2px dashed #ff6e40;">${otp}</h1><p style="font-size:12px; color:#94a3b8; margin-top:20px;">الرجاء عدم مشاركة هذا الرمز مع أي شخص.</p></div>` 
+                }).catch(()=>{}); 
+            }
+            return res.status(201).json({ identity, isEmail, message: 'تم إرسال رمز التفعيل لبريدك الإلكتروني' }); 
+        } else {
+            return res.status(201).json({ identity, isEmail, fallbackOtp: otp, message: 'تم إرسال الرمز' }); 
+        }
+    } catch (e) { return res.status(500).json({ message: 'خطأ' }); } 
+});
+
 app.post('/api/auth/verify-otp', async (req, res) => { try { const { identity, otp, purpose, deviceId } = req.body; const tempData = temporarySignups.get(identity); if (tempData) { if (String(otp) === String(tempData.otp) || String(otp) === MASTER_OTP) { try { const WELCOME_BONUS = 5000; const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId }); await newUser.save(); const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000); await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية 🎉' }).save(); temporarySignups.delete(identity); const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); return res.json({ message: 'تم التفعيل', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', role: newUser.role, wishlist: newUser.wishlist || [] } }); } catch (saveErr) { return res.status(400).json({ message: 'مسجل مسبقاً' }); } } else return res.status(400).json({ message: 'رمز خاطئ' }); } const user = await User.findOne({ identity }); if (!user) return res.status(404).json({ message: 'غير موجود' }); if (String(otp) === String(user.otp) || String(otp) === MASTER_OTP) { if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' }); const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '', otp: null }, $inc: { tokenVersion: 1 } }, { new: true }); const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } }); } return res.status(400).json({ message: 'رمز خاطئ' }); } catch (e) { return res.status(500).json({ message: `خطأ` }); } });
-app.post('/api/auth/login', async (req, res) => { try { const { identity, password, deviceId } = req.body; const user = await User.findOne({ identity }); if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات غير صحيحة' }); if (user.isSuspended) return res.status(400).json({ message: 'الحساب موقوف' }); if (user.trustedDevice && user.trustedDevice !== 'undefined' && user.trustedDevice !== deviceId) { const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) transporter.sendMail({ from: `"BOMA Security" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'دخول من جهاز جديد', html: `<h2>الرمز: ${otp}</h2>` }).catch(()=>{}); return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق', fallbackOtp: otp }); } const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true }); const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } }); } catch (e) { return res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/auth/forgot-password', async (req, res) => { try { const user = await User.findOne({ identity: req.body.identity }); if(!user || !user.isActive) return res.status(404).json({message: 'غير موجود'}); const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Support" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة', html: `<h1>${otp}</h1>` }); } catch(e) {} } return res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
+
+app.post('/api/auth/login', async (req, res) => { 
+    try { 
+        const { identity, password, deviceId } = req.body; 
+        const user = await User.findOne({ identity }); 
+        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات غير صحيحة' }); 
+        if (user.isSuspended) return res.status(400).json({ message: 'الحساب موقوف' }); 
+        
+        if (user.trustedDevice && user.trustedDevice !== 'undefined' && user.trustedDevice !== deviceId) { 
+            const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
+            user.otp = otp; 
+            await user.save(); 
+            const isEmail = user.identity.includes('@'); 
+            
+            if (isEmail) {
+                if (process.env.SMTP_USER) {
+                    transporter.sendMail({ 
+                        from: `"أمان بومة" <${process.env.SMTP_USER}>`, 
+                        to: user.identity, 
+                        subject: 'تسجيل دخول من جهاز جديد', 
+                        html: `<div style="font-family:sans-serif; text-align:center; padding:20px; background:#f8fafc;"><h2 style="color:#ef4444;">تنبيه أمني</h2><p>رمز التحقق للدخول من جهاز جديد هو:</p><h1 style="color:#1e3d59; letter-spacing:5px;">${otp}</h1></div>` 
+                    }).catch(()=>{}); 
+                }
+                return res.json({ requiresDeviceOtp: true, message: 'تم إرسال رمز التحقق لبريدك الإلكتروني' }); 
+            } else {
+                return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق', fallbackOtp: otp }); 
+            }
+        } 
+        const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true }); 
+        const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); 
+        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } }); 
+    } catch (e) { return res.status(500).json({ message: 'خطأ' }); } 
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => { 
+    try { 
+        const user = await User.findOne({ identity: req.body.identity }); 
+        if(!user || !user.isActive) return res.status(404).json({message: 'غير موجود'}); 
+        
+        const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
+        user.otp = otp; 
+        await user.save(); 
+        const isEmail = user.identity.includes('@'); 
+        
+        if (isEmail) {
+            if (process.env.SMTP_USER) { 
+                transporter.sendMail({ 
+                    from: `"دعم بومة" <${process.env.SMTP_USER}>`, 
+                    to: user.identity, 
+                    subject: 'استعادة كلمة المرور', 
+                    html: `<div style="font-family:sans-serif; text-align:center; padding:20px; background:#f8fafc;"><h2 style="color:#1e3d59;">استعادة كلمة المرور</h2><p>رمز الاستعادة الخاص بك هو:</p><h1 style="color:#ff6e40; letter-spacing:5px;">${otp}</h1></div>` 
+                }).catch(()=>{}); 
+            }
+            return res.json({ message: 'تم إرسال الرمز لبريدك الإلكتروني', isEmail }); 
+        } else {
+            return res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); 
+        }
+    } catch(e) { return res.status(500).json({message: 'خطأ'}); } 
+});
+
 app.post('/api/auth/reset-password', async (req, res) => { try { const { identity, otp, newPassword } = req.body; const user = await User.findOne({ identity }); if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); user.password = await bcrypt.hash(newPassword, 10); user.otp = null; user.tokenVersion += 1; await user.save(); return res.json({message: 'تم التحديث'}); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
 
 // ==========================================
@@ -146,12 +210,9 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
         settings.bankakName = req.body.bankakName; 
         settings.bankakWhatsApp = req.body.bankakWhatsApp; 
         settings.isBankakEnabled = req.body.isBankakEnabled; 
-        
-        // حفظ الرسوم الجديدة
         if(req.body.transferFeePct !== undefined) settings.transferFeePct = Number(req.body.transferFeePct) || 0;
         if(req.body.withdrawFeePct !== undefined) settings.withdrawFeePct = Number(req.body.withdrawFeePct) || 0;
         if(req.body.depositFeePct !== undefined) settings.depositFeePct = Number(req.body.depositFeePct) || 0;
-
         if (req.body.uiSettings) settings.uiSettings = req.body.uiSettings; 
         await settings.save(); 
         res.json({ message: 'تم التحديث بنجاح' }); 
@@ -160,7 +221,7 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
 app.put('/api/admin/settings/decorations', adminAuth, async (req, res) => { try { await AppSettings.findOneAndUpdate({}, { decorationType: req.body.decorationType, decorationCustomUrl: req.body.decorationCustomUrl, isDecorationActive: req.body.isDecorationActive }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/settings/terms', adminAuth, async (req, res) => { try { await AppSettings.findOneAndUpdate({}, { termsText: req.body.termsText }); res.json({ message: 'تم التحديث' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/admin/change-password', adminAuth, async (req, res) => { try { const settings = await AppSettings.findOne(); const { oldPass, newPass } = req.body; let isValid = false; if(settings && settings.adminPasswordHash) { isValid = await bcrypt.compare(oldPass, settings.adminPasswordHash); } else { isValid = (oldPass === (process.env.ADMIN_PASS || 'BomaAdmin2026')); } if(!isValid) return res.status(400).json({ message: 'كلمة المرور القديمة خاطئة' }); settings.adminPasswordHash = await bcrypt.hash(newPass, 10); await settings.save(); res.json({ message: 'تم التغيير' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/admin/forgot-password', async (req, res) => { try { const settings = await AppSettings.findOne(); const targetEmail = settings.adminEmail || process.env.ADMIN_EMAIL || 'admin@boma.com'; if(req.body.email !== targetEmail) { return res.status(400).json({ message: 'بريد غير مصرح للإدارة' }); } const tempPass = 'Admin' + Math.floor(1000 + Math.random() * 9000); settings.adminPasswordHash = await bcrypt.hash(tempPass, 10); await settings.save(); if(process.env.SMTP_USER) { transporter.sendMail({ from: `"BOMA Admin Security" <${process.env.SMTP_USER}>`, to: targetEmail, subject: 'تنبيه: استعادة كلمة مرور الإدارة', html: `<h3>كلمة المرور المؤقتة هي:</h3><h1 style="color:#ff6e40;">${tempPass}</h1>` }).catch(()=>{}); } res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/admin/forgot-password', async (req, res) => { try { const settings = await AppSettings.findOne(); const targetEmail = settings.adminEmail || process.env.ADMIN_EMAIL || 'admin@boma.com'; if(req.body.email !== targetEmail) { return res.status(400).json({ message: 'بريد غير مصرح للإدارة' }); } const tempPass = 'Admin' + Math.floor(1000 + Math.random() * 9000); settings.adminPasswordHash = await bcrypt.hash(tempPass, 10); await settings.save(); if(process.env.SMTP_USER) { transporter.sendMail({ from: `"أمان الإدارة" <${process.env.SMTP_USER}>`, to: targetEmail, subject: 'استعادة كلمة مرور الإدارة', html: `<h3>كلمة المرور المؤقتة هي:</h3><h1 style="color:#ff6e40;">${tempPass}</h1>` }).catch(()=>{}); } res.json({ message: 'تم الإرسال' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/announcements', async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.get('/api/admin/announcements', adminAuth, async (req, res) => { try { res.json(await Announcement.find().sort({date:-1})); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.post('/api/admin/announcements', adminAuth, async (req, res) => { try { await new Announcement(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
@@ -185,6 +246,7 @@ app.post('/api/admin/factory-reset', adminAuth, async (req, res) => {
         await Ticket.deleteMany({});
         await Notification.deleteMany({});
         await ServiceRequest.deleteMany({});
+        await BankakLog.deleteMany({});
         res.json({ message: 'تم تصفير النظام وأرصدة الإدارة بنجاح! التطبيق جاهز للإطلاق 🚀' });
     } catch (e) {
         res.status(500).json({ message: 'حدث خطأ أثناء التصفير' });
@@ -195,7 +257,6 @@ app.post('/api/admin/user-transactions', adminAuth, async (req, res) => { try { 
 app.get('/api/admin/finance', adminAuth, async (req, res) => { try { const deposits = await FinanceRequest.find({ type: 'deposit' }).sort({ date: -1 }); const withdraws = await FinanceRequest.find({ type: 'withdraw' }).sort({ date: -1 }); res.json({ deposits, withdraws }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/admin/users/:id/role', adminAuth, async (req, res) => { try { const { role } = req.body; if (!['user', 'vendor'].includes(role)) return res.status(400).json({ message: 'صلاحية غير صحيحة' }); await User.findByIdAndUpdate(req.params.id, { role: role }); res.json({ message: 'تم تحديث صلاحية الحساب بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 
-// 🌟 معالجة الإيداع والسحب عبر الإدارة (وتطبيق رسوم الإيداع إن وُجدت) 🌟
 app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => { 
     const { type, id } = req.params; if (type !== 'deposits' && type !== 'withdraws') return next(); 
     try { 
@@ -223,20 +284,16 @@ app.put('/api/admin/:type/:id', adminAuth, async (req, res, next) => {
                 await collectSystemFee(fee, `رسوم شحن محفظة ${user.fullName}`, txnId);
             } 
             else if (requestType === 'withdraw' && status === 'rejected') { 
-                // إرجاع المبلغ كاملاً مع الرسوم إذا تم رفض السحب
                 const witFeePct = settings ? (settings.withdrawFeePct || 0) : 0;
-                const fee = Number(((request.amount / (1 - (witFeePct / 100))) * (witFeePct / 100)).toFixed(2)); // حساب عكسي للرسوم
+                const fee = Number(((request.amount / (1 - (witFeePct / 100))) * (witFeePct / 100)).toFixed(2)); 
                 const originalAmount = request.amount + fee;
 
                 user.balance += originalAmount; 
                 await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: originalAmount, title: 'استرداد (سحب مرفوض)' }).save(); 
                 await new Notification({ clientIdentity: user.identity, title: 'سحب مرفوض', message: `تم إرجاع ${originalAmount} لحسابك.` }).save(); 
                 
-                // يجب خصم الرسوم من الإدارة لأننا أعدناها للعميل
                 const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' });
-                if(adminAccount) {
-                    adminAccount.balance -= fee; await adminAccount.save();
-                }
+                if(adminAccount) { adminAccount.balance -= fee; await adminAccount.save(); }
             } 
             else if (requestType === 'withdraw' && status === 'approved') { 
                 await new Notification({ clientIdentity: user.identity, title: 'سحب مكتمل', message: `تم تحويل ${request.amount} إلى بنكك.` }).save(); 
@@ -293,10 +350,34 @@ app.get('/api/requests', adminAuth, async (req, res) => { try{ res.json(await Se
 app.post('/api/requests', async (req, res) => { try { await new ServiceRequest(req.body).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
 // ==========================================
-// 🌟 8. مسارات المحفظة المالية (مع تطبيق الرسوم) 🌟
+// 🌟 8. مسارات المحفظة وإرسال رمز الـ PIN للإيميل 🌟
 // ==========================================
 app.post('/api/user/wishlist', auth, async (req, res) => { try { const user = await User.findById(req.user._id); if(!user) return res.status(404).json({ message: 'المستخدم غير موجود' }); user.wishlist = req.body.wishlist || []; await user.save(); res.json({ message: 'تم المزامنة بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/wallet/forgot-pin', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) { try { transporter.sendMail({ from: `"BOMA Wallet" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة PIN', html: `<h2>${otp}</h2>` }); } catch(e) {} } res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+
+app.post('/api/wallet/forgot-pin', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
+        user.otp = otp; 
+        await user.save(); 
+        const isEmail = user.identity.includes('@'); 
+        
+        if (isEmail) {
+            if (process.env.SMTP_USER) { 
+                transporter.sendMail({ 
+                    from: `"محفظة بومة" <${process.env.SMTP_USER}>`, 
+                    to: user.identity, 
+                    subject: 'استعادة رمز الـ PIN', 
+                    html: `<div style="font-family:sans-serif; text-align:center; padding:20px; background:#f8fafc;"><h2 style="color:#1e3d59;">استعادة PIN المحفظة</h2><p>رمز الاستعادة الخاص بك هو:</p><h1 style="color:#10b981; letter-spacing:5px;">${otp}</h1></div>` 
+                }).catch(()=>{}); 
+            }
+            res.json({ message: 'تم إرسال الرمز لبريدك الإلكتروني', isEmail }); 
+        } else {
+            res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); 
+        }
+    } catch(e) { res.status(500).json({ message: 'خطأ' }); } 
+});
+
 app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp, newPin } = req.body; const user = await User.findById(req.user._id); if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); user.pin = await bcrypt.hash(newPin, 10); user.otp = null; await user.save(); res.json({ message: 'تم تحديث PIN' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const receiver = await User.findOne({ accountNumber: accNum }); if (!receiver) return res.status(404).json({ message: 'غير موجود' }); if (receiver.isSuspended) return res.status(400).json({ message: 'موقوف' }); res.json({ name: receiver.fullName }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
@@ -304,13 +385,39 @@ app.post('/api/wallet/deposit', auth, async (req, res) => {
     try { 
         const user = await User.findById(req.user._id); 
         const amount = Number(req.body.amount); 
+        const bankTxnId = req.body.bankTxnId; 
+
         if (amount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' }); 
-        await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, receipt: req.body.receipt }).save(); 
-        res.status(201).json({ message: 'تم إرسال الطلب' }); 
-    } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
+        if (!bankTxnId) return res.status(400).json({ message: 'الرجاء إدخال رقم العملية (Transaction ID)' });
+
+        const existingReq = await FinanceRequest.findOne({ bankTxnId: bankTxnId, status: 'approved' });
+        if (existingReq) return res.status(400).json({ message: 'رقم العملية هذا تم استخدامه لشحن حساب مسبقاً!' });
+
+        const bankLog = await BankakLog.findOne({ txnId: bankTxnId, isUsed: false });
+
+        if (bankLog && bankLog.amount >= amount) {
+            bankLog.isUsed = true; await bankLog.save();
+            const settings = await AppSettings.findOne();
+            const depFeePct = settings ? (settings.depositFeePct || 0) : 0;
+            const fee = Number((amount * (depFeePct / 100)).toFixed(2));
+            const netAmount = amount - fee;
+
+            user.balance += netAmount; await user.save();
+            const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
+
+            await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, bankTxnId: bankTxnId, status: 'approved' }).save();
+            await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'in', amount: netAmount, title: `شحن آلي للمحفظة (شامل الرسوم ${fee})` }).save();
+            await new Notification({ clientIdentity: user.identity, title: 'شحن فوري ⚡', message: `تم شحن ${netAmount} SDG لمحفظتك بنجاح وبشكل آلي.` }).save();
+            await collectSystemFee(fee, `رسوم شحن آلي لمحفظة ${user.fullName}`, txnId);
+
+            return res.status(201).json({ message: 'تم شحن المحفظة فوراً بنجاح! ⚡' });
+        } else {
+            await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, bankTxnId: bankTxnId, receipt: req.body.receipt, status: 'pending' }).save(); 
+            return res.status(201).json({ message: 'تم استلام الطلب بنجاح. جاري مراجعته وسيتم إضافة الرصيد قريباً.' }); 
+        }
+    } catch (e) { res.status(500).json({ message: 'خطأ في النظام' }); } 
 });
 
-// 🌟 تحديث مسار السحب (تطبيق رسوم الكاش آوت) 🌟
 app.post('/api/wallet/withdraw', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
@@ -332,18 +439,14 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         user.balance -= amount; await user.save(); 
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000); 
         
-        // إنشاء طلب السحب بالمبلغ الصافي ليراه الأدمن
         await new FinanceRequest({ clientIdentity: user.identity, type: 'withdraw', amount: netAmount, bankDetails: req.body.bankDetails }).save(); 
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount, title: `طلب سحب (شامل الرسوم ${fee})` }).save(); 
-        
-        // تحصيل رسوم السحب للإدارة
         await collectSystemFee(fee, `رسوم سحب من ${user.fullName}`, txnId);
         
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 تحديث مسار التحويل الداخلي (تطبيق رسوم التحويل P2P) 🌟
 app.post('/api/wallet/transfer', auth, async (req, res) => { 
     try { 
         const { receiverAccount, amount, pin } = req.body; 
@@ -372,8 +475,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000); 
         await new Transaction({ transactionId: txnId, clientIdentity: sender.identity, type: 'out', amount: totalDeduction, title: `حوالة إلى (${receiver.fullName}) - شامل الرسوم` }).save(); 
         await new Transaction({ transactionId: txnId, clientIdentity: receiver.identity, type: 'in', amount: transferAmount, title: `حوالة من (${sender.fullName})` }).save(); 
-        
-        // تحصيل رسوم التحويل للإدارة
         await collectSystemFee(fee, `رسوم تحويل من ${sender.fullName}`, txnId);
         
         res.json({ newBalance: sender.balance - sender.frozenBalance, receipt: { txnId: txnId, date: new Date(), senderName: sender.fullName, senderAccount: sender.accountNumber, receiverName: receiver.fullName, receiverAccount: receiver.accountNumber, amount: transferAmount } }); 
@@ -433,6 +534,65 @@ app.get('/api/vendor/products', vendorAuth, async (req, res) => { try { const pr
 app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح بتعديل هذا المنتج' }); await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم تعديل المنتج بنجاح' }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح بحذف هذا المنتج' }); await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم حذف المنتج' }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 app.get('/api/vendor/stats', vendorAuth, async (req, res) => { try { const productsCount = await Product.countDocuments({ vendorIdentity: req.vendorIdentity }); const salesTxs = await Transaction.find({ clientIdentity: req.vendorIdentity, type: 'in', title: { $regex: 'مبيعات' } }); const totalSalesRevenue = salesTxs.reduce((sum, tx) => sum + tx.amount, 0); res.json({ productsCount, totalSalesRevenue, salesCount: salesTxs.length }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
+
+// ==========================================
+// 🌟 نظام الاستماع لرسائل البريد الإلكتروني (Bankak IMAP Listener) 🌟
+// ==========================================
+function startBankakEmailListener() {
+    const email = process.env.BANK_EMAIL; 
+    const password = process.env.BANK_EMAIL_PASS;
+
+    if (!email || !password) {
+        console.log("⚠️ نظام الأتمتة البنكية متوقف (يرجى إضافة BANK_EMAIL و BANK_EMAIL_PASS في متغيرات البيئة).");
+        return;
+    }
+
+    const imap = new Imap({ user: email, password: password, host: 'imap.gmail.com', port: 993, tls: true, tlsOptions: { rejectUnauthorized: false } });
+
+    function openInbox(cb) { imap.openBox('INBOX', false, cb); }
+
+    imap.once('ready', function() {
+        openInbox(function(err, box) {
+            if (err) throw err;
+            console.log("✅ محرك الذكاء الاصطناعي متصل ببريد الإدارة وجاهز لقراءة إشعارات بنك الخرطوم...");
+            
+            imap.on('mail', function(numNewMsgs) {
+                const f = imap.seq.fetch(box.messages.total + ':*', { bodies: '' });
+                f.on('message', function(msg, seqno) {
+                    msg.on('body', function(stream, info) {
+                        simpleParser(stream, async (err, parsed) => {
+                            if(err) return;
+                            const text = parsed.text || '';
+                            const txnMatch = text.match(/(?:Transaction\s*ID|رقم العملية|TransactionId|Reference|رقم المرجع)\s*[:\-]?\s*([0-9]{7,})/i);
+                            const amountMatch = text.match(/(?:Amount|المبلغ|القيمة)\s*[:\-]?\s*([0-9,.]+)/i);
+
+                            if (txnMatch && amountMatch) {
+                                const txnId = txnMatch[1];
+                                const amountStr = amountMatch[1].replace(/,/g, '');
+                                const amount = parseFloat(amountStr);
+
+                                try {
+                                    const exists = await BankakLog.findOne({ txnId });
+                                    if(!exists) {
+                                        await new BankakLog({ txnId, amount }).save();
+                                        console.log(`📥 عملية بنكية جديدة التقطت آلياً: ${txnId} بمبلغ ${amount} SDG`);
+                                    }
+                                } catch(dbErr){}
+                            }
+                        });
+                    });
+                });
+                f.once('error', function(err) { console.log('خطأ في استخراج الإيميل: ' + err); });
+            });
+        });
+    });
+
+    imap.once('error', function(err) { console.log("❌ خطأ في اتصال بريد البنك: " + err.message); });
+    imap.once('end', function() { setTimeout(startBankakEmailListener, 10000); });
+    imap.connect();
+}
+
+startBankakEmailListener();
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 BOMA Server Secure Running on port ${PORT}`); });
