@@ -1,5 +1,4 @@
 require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -39,7 +38,7 @@ const AppSettings = mongoose.model('AppSettings', new mongoose.Schema({
     decorationCustomUrl: { type: String, default: '' },
     isDecorationActive: { type: Boolean, default: false },
     adminPasswordHash: { type: String, default: '' },
-    adminEmail: { type: String, default: 'admin@boma.com' },
+    adminEmail: { type: String, default: 'infoboma0@gmail.com' },
     termsText: { type: String, default: '' }, 
     uiSettings: { type: Object, default: {} } 
 }));
