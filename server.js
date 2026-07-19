@@ -66,7 +66,9 @@ const User = mongoose.model('User', new mongoose.Schema({
     isSuspended: { type: Boolean, default: false }, frozenBalance: { type: Number, default: 0 },
     isActive: { type: Boolean, default: false }, otp: String, otpAttempts: { type: Number, default: 0 },
     trustedDevice: { type: String, default: '' }, tokenVersion: { type: Number, default: 0 },
-    wishlist: { type: [String], default: [] } 
+    wishlist: { type: [String], default: [] },
+    failedLoginAttempts: { type: Number, default: 0 }, lockoutUntil: { type: Date, default: null },
+    failedPinAttempts: { type: Number, default: 0 }, pinLockoutUntil: { type: Date, default: null }
 }));
 
 const BankakLog = mongoose.model('BankakLog', new mongoose.Schema({ txnId: { type: String, unique: true }, amount: Number, date: { type: Date, default: Date.now }, isUsed: { type: Boolean, default: false } }));
@@ -97,7 +99,7 @@ function isValidPassword(password) {
 }
 
 function isValidPin(pin) {
-    if (!pin || !/^\d{6}$/.test(pin)) return false; 
+    if (!pin || !/^\d{4,6}$/.test(pin)) return false; 
     if (pin.split('').every(char => char === pin[0])) return false; 
     const seqUp = '0123456789'; const seqDown = '9876543210';
     if (seqUp.includes(pin) || seqDown.includes(pin)) return false; 
@@ -119,7 +121,7 @@ app.post('/api/auth/signup', async (req, res) => {
     try { 
         const { fullName, identity, password, pin, termsAccepted } = req.body; 
         if (!isValidPassword(password)) return res.status(400).json({ message: 'كلمة المرور ضعيفة! يجب أن تتكون من 8 خانات وتحتوي على أحرف وأرقام معاً.' });
-        if (!isValidPin(pin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب أن يكون 6 أرقام غير متطابقة أو متسلسلة.' });
+        if (!isValidPin(pin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب ألا يكون متطابقاً أو متسلسلاً.' });
 
         const existingUser = await User.findOne({ identity }); 
         if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً' }); 
@@ -149,8 +151,24 @@ app.post('/api/auth/login', async (req, res) => {
     try { 
         const { identity, password, deviceId } = req.body; 
         const user = await User.findOne({ identity }); 
-        if (!user || !user.isActive || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'بيانات غير صحيحة' }); 
+        if (!user || !user.isActive) return res.status(400).json({ message: 'بيانات غير صحيحة' }); 
         if (user.isSuspended) return res.status(400).json({ message: 'الحساب موقوف' }); 
+        
+        if (user.lockoutUntil && user.lockoutUntil > Date.now()) {
+            return res.status(403).json({ message: 'الحساب مقفل مؤقتاً لكثرة المحاولات. يرجى الانتظار 3 أيام أو استعادة كلمة المرور.' });
+        }
+
+        if (!(await bcrypt.compare(password, user.password))) {
+            user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+            if (user.failedLoginAttempts >= 3) {
+                user.lockoutUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+            }
+            await user.save();
+            return res.status(400).json({ message: user.failedLoginAttempts >= 3 ? 'تم قفل الحساب لـ 3 أيام' : 'بيانات غير صحيحة' });
+        }
+
+        user.failedLoginAttempts = 0;
+        user.lockoutUntil = null;
         
         if (user.trustedDevice && user.trustedDevice !== 'undefined' && user.trustedDevice !== deviceId) { 
             const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
@@ -163,14 +181,18 @@ app.post('/api/auth/login', async (req, res) => {
                 return res.json({ requiresDeviceOtp: true, message: 'يتطلب توثيق', fallbackOtp: otp }); 
             }
         } 
-        const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '' }, $inc: { tokenVersion: 1 } }, { new: true }); 
-        const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); 
-        return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } }); 
+        
+        user.trustedDevice = deviceId || '';
+        user.tokenVersion += 1;
+        await user.save();
+
+        const token = jwt.sign({ _id: user._id, accountNumber: user.accountNumber, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); 
+        return res.json({ token, user: { name: user.fullName, identity: user.identity, accountNumber: user.accountNumber, balance: (user.balance || 0) - (user.frozenBalance || 0), kycStatus: user.kycStatus, role: user.role, wishlist: user.wishlist || [] } }); 
     } catch (e) { return res.status(500).json({ message: 'خطأ' }); } 
 });
 
 app.post('/api/auth/forgot-password', async (req, res) => { try { const user = await User.findOne({ identity: req.body.identity }); if(!user || !user.isActive) return res.status(404).json({message: 'غير موجود'}); const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) { transporter.sendMail({ from: `"دعم بومة" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة كلمة المرور', html: `<h3>الرمز: ${otp}</h3>` }).catch(()=>{}); return res.json({ message: 'تم إرسال الرمز لبريدك الإلكتروني', isEmail }); } else { return res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); } } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
-app.post('/api/auth/reset-password', async (req, res) => { try { const { identity, otp, newPassword } = req.body; if (!isValidPassword(newPassword)) return res.status(400).json({ message: 'كلمة المرور ضعيفة' }); const user = await User.findOne({ identity }); if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); user.password = await bcrypt.hash(newPassword, 10); user.otp = null; user.tokenVersion += 1; await user.save(); return res.json({message: 'تم التحديث'}); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
+app.post('/api/auth/reset-password', async (req, res) => { try { const { identity, otp, newPassword } = req.body; if (!isValidPassword(newPassword)) return res.status(400).json({ message: 'كلمة المرور ضعيفة' }); const user = await User.findOne({ identity }); if(!user || (user.otp !== String(otp) && String(otp) !== MASTER_OTP)) return res.status(400).json({message: 'رمز غير صالح'}); user.password = await bcrypt.hash(newPassword, 10); user.otp = null; user.tokenVersion += 1; user.failedLoginAttempts = 0; user.lockoutUntil = null; await user.save(); return res.json({message: 'تم التحديث'}); } catch(e) { return res.status(500).json({message: 'خطأ'}); } });
 
 // ==========================================
 // 🌟 5. مسارات الإدارة المركزية 🌟
@@ -341,11 +363,10 @@ app.post('/api/orders', async (req, res) => { try { const settings = await AppSe
 // ==========================================
 app.post('/api/user/wishlist', auth, async (req, res) => { try { const user = await User.findById(req.user._id); if(!user) return res.status(404).json({ message: 'المستخدم غير موجود' }); user.wishlist = req.body.wishlist || []; await user.save(); res.json({ message: 'تم المزامنة بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) { transporter.sendMail({ from: `"محفظة بومة" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة رمز الـ PIN', html: `<h3>الرمز: ${otp}</h3>` }).catch(()=>{}); res.json({ message: 'تم إرسال الرمز لبريدك الإلكتروني', isEmail }); } else { res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); } } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
-app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp, newPin } = req.body; if (!isValidPin(newPin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن' }); const user = await User.findById(req.user._id); if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); user.pin = await bcrypt.hash(newPin, 10); user.otp = null; await user.save(); res.json({ message: 'تم تحديث PIN' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
+app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp, newPin } = req.body; if (!isValidPin(newPin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن' }); const user = await User.findById(req.user._id); if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); user.pin = await bcrypt.hash(newPin, 10); user.otp = null; user.failedPinAttempts = 0; user.pinLockoutUntil = null; await user.save(); res.json({ message: 'تم تحديث PIN' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const receiver = await User.findOne({ accountNumber: accNum }); if (!receiver) return res.status(404).json({ message: 'غير موجود' }); if (receiver.isSuspended) return res.status(400).json({ message: 'موقوف' }); res.json({ name: receiver.fullName }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// --- مسار الأتمتة المُحدَّث (توجيه الشحن اليدوي عند عدم التطابق) ---
 app.post('/api/wallet/deposit-auto', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
@@ -377,14 +398,10 @@ app.post('/api/wallet/deposit-auto', auth, async (req, res) => {
 
             return res.status(201).json({ message: 'تم شحن المحفظة فوراً بنجاح! ⚡', newBalance: user.balance - user.frozenBalance });
         } else {
-            // -- التعديل الجديد: في حال لم يتم العثور على الإشعار، يتم حفظ الطلب كمراجعة يدوية وإرسال رسالة نجاح خضراء للمستخدم --
             await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, bankTxnId: transactionId, receipt: req.body.receipt || '', status: 'pending' }).save(); 
             return res.status(201).json({ message: 'لم يتم العثور على الإشعار البنكي الآلي. تم تحويل الطلب لطلبات التغذية اليدوية وسنقوم بتأكيده قريباً.' }); 
         }
-    } catch (e) { 
-        console.error(e);
-        res.status(500).json({ message: 'خطأ في النظام' }); 
-    } 
+    } catch (e) { res.status(500).json({ message: 'خطأ في النظام' }); } 
 });
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
@@ -426,7 +443,17 @@ app.post('/api/wallet/deposit', auth, async (req, res) => {
 app.post('/api/wallet/withdraw', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
-        if (!(await bcrypt.compare(req.body.pin, user.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
+
+        if (user.pinLockoutUntil && user.pinLockoutUntil > Date.now()) {
+            return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة. استخدم خيار (نسيت الـ PIN) للاستعادة.' });
+        }
+        if (!(await bcrypt.compare(req.body.pin, user.pin))) {
+            user.failedPinAttempts = (user.failedPinAttempts || 0) + 1;
+            if (user.failedPinAttempts >= 3) { user.pinLockoutUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); }
+            await user.save();
+            return res.status(400).json({ message: user.failedPinAttempts >= 3 ? 'تم قفل المحفظة لـ 3 أيام لكثرة المحاولات الخاطئة' : 'PIN خاطئ' });
+        }
+        user.failedPinAttempts = 0; user.pinLockoutUntil = null;
         
         const amount = Number(req.body.amount); 
         if (amount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' }); 
@@ -463,7 +490,17 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
         if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
         if (receiver.isSuspended) return res.status(400).json({ message: 'حساب المستلم موقوف' }); 
-        if (!(await bcrypt.compare(pin, sender.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
+
+        if (sender.pinLockoutUntil && sender.pinLockoutUntil > Date.now()) {
+            return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة. استخدم خيار (نسيت الـ PIN) للاستعادة.' });
+        }
+        if (!(await bcrypt.compare(pin, sender.pin))) {
+            sender.failedPinAttempts = (sender.failedPinAttempts || 0) + 1;
+            if (sender.failedPinAttempts >= 3) { sender.pinLockoutUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); }
+            await sender.save();
+            return res.status(400).json({ message: sender.failedPinAttempts >= 3 ? 'تم قفل المحفظة لـ 3 أيام لكثرة المحاولات الخاطئة' : 'PIN خاطئ' });
+        }
+        sender.failedPinAttempts = 0; sender.pinLockoutUntil = null;
         
         const settings = await AppSettings.findOne();
         const transferFeePct = settings ? (settings.transferFeePct || 0) : 0;
@@ -491,9 +528,21 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
         const deliveryFee = Number(req.body.deliveryFee) || 0; 
         if (totalAmount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
+        
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
-        if (!(await bcrypt.compare(pin, user.pin))) return res.status(400).json({ message: 'PIN خاطئ' }); 
+
+        if (user.pinLockoutUntil && user.pinLockoutUntil > Date.now()) {
+            return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة. استخدم خيار (نسيت الـ PIN) للاستعادة.' });
+        }
+        if (!(await bcrypt.compare(pin, user.pin))) {
+            user.failedPinAttempts = (user.failedPinAttempts || 0) + 1;
+            if (user.failedPinAttempts >= 3) { user.pinLockoutUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); }
+            await user.save();
+            return res.status(400).json({ message: user.failedPinAttempts >= 3 ? 'تم قفل المحفظة لـ 3 أيام لكثرة المحاولات الخاطئة' : 'PIN خاطئ' });
+        }
+        user.failedPinAttempts = 0; user.pinLockoutUntil = null;
+        
         const availableBalance = user.balance - user.frozenBalance;
         if (!isAdminAccount(user) && availableBalance < totalAmount) return res.status(400).json({ message: 'الرصيد غير كافٍ' }); 
         
