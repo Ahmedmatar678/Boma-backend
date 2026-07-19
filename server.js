@@ -336,13 +336,53 @@ app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order
 app.post('/api/orders', async (req, res) => { try { const settings = await AppSettings.findOne(); if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، المتجر متوقف مؤقتاً' }); const cartItems = req.body.cartItems || req.body.items || []; const orderData = { ...req.body, items: cartItems }; await new Order(orderData).save(); for(let item of cartItems) { await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); } res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 // ==========================================
-// 🌟 7. المحفظة (Wallet) 🌟
+// 🌟 7. المحفظة والأتمتة (Wallet & Deposit-Auto) 🌟
 // ==========================================
 app.post('/api/user/wishlist', auth, async (req, res) => { try { const user = await User.findById(req.user._id); if(!user) return res.status(404).json({ message: 'المستخدم غير موجود' }); user.wishlist = req.body.wishlist || []; await user.save(); res.json({ message: 'تم المزامنة بنجاح' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/wallet/forgot-pin', auth, async (req, res) => { try { const user = await User.findById(req.user._id); const otp = Math.floor(1000 + Math.random() * 9000).toString(); user.otp = otp; await user.save(); const isEmail = user.identity.includes('@'); if (isEmail && process.env.SMTP_USER) { transporter.sendMail({ from: `"محفظة بومة" <${process.env.SMTP_USER}>`, to: user.identity, subject: 'استعادة رمز الـ PIN', html: `<h3>الرمز: ${otp}</h3>` }).catch(()=>{}); res.json({ message: 'تم إرسال الرمز لبريدك الإلكتروني', isEmail }); } else { res.json({ message: 'تم إرسال الرمز', isEmail, fallbackOtp: otp }); } } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp, newPin } = req.body; if (!isValidPin(newPin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن' }); const user = await User.findById(req.user._id); if (user.otp !== String(otp) && String(otp) !== MASTER_OTP) return res.status(400).json({ message: 'رمز غير صحيح' }); user.pin = await bcrypt.hash(newPin, 10); user.otp = null; await user.save(); res.json({ message: 'تم تحديث PIN' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const receiver = await User.findOne({ accountNumber: accNum }); if (!receiver) return res.status(404).json({ message: 'غير موجود' }); if (receiver.isSuspended) return res.status(400).json({ message: 'موقوف' }); res.json({ name: receiver.fullName }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+
+// --- مسار الأتمتة المضاف حديثاً (شحن فوري برقم العملية) ---
+app.post('/api/wallet/deposit-auto', auth, async (req, res) => { 
+    try { 
+        const user = await User.findById(req.user._id); 
+        const amount = Number(req.body.amount); 
+        const transactionId = req.body.transactionId; 
+        
+        if (amount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' }); 
+        if (!transactionId) return res.status(400).json({ message: 'الرجاء إدخال رقم العملية (Transaction ID)' });
+
+        const existingReq = await FinanceRequest.findOne({ bankTxnId: transactionId, status: 'approved' });
+        if (existingReq) return res.status(400).json({ message: 'رقم العملية هذا تم استخدامه لشحن حساب مسبقاً!' });
+
+        const bankLog = await BankakLog.findOne({ txnId: transactionId, isUsed: false });
+
+        if (bankLog && bankLog.amount >= amount) {
+            bankLog.isUsed = true; await bankLog.save();
+            const settings = await AppSettings.findOne();
+            const depFeePct = settings ? (settings.depositFeePct || 0) : 0;
+            const fee = Number((amount * (depFeePct / 100)).toFixed(2));
+            const netAmount = amount - fee;
+
+            user.balance += netAmount; await user.save();
+            const txnIdStr = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
+
+            await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, bankTxnId: transactionId, status: 'approved' }).save();
+            await new Transaction({ transactionId: txnIdStr, clientIdentity: user.identity, type: 'in', amount: netAmount, title: `شحن آلي للمحفظة (شامل الرسوم ${fee})` }).save();
+            await new Notification({ clientIdentity: user.identity, title: 'شحن فوري ⚡', message: `تم شحن ${netAmount} SDG لمحفظتك بنجاح وبشكل آلي.` }).save();
+            await collectSystemFee(fee, `رسوم شحن آلي لمحفظة ${user.fullName}`, txnIdStr);
+
+            return res.status(201).json({ message: 'تم شحن المحفظة فوراً بنجاح! ⚡', newBalance: user.balance - user.frozenBalance });
+        } else {
+            return res.status(400).json({ message: 'لم يتم العثور على تحويل مطابق. تأكد من رقم العملية أو انتظر وصول الإشعار البنكي.' }); 
+        }
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ message: 'خطأ في النظام' }); 
+    } 
+});
 
 app.post('/api/wallet/deposit', auth, async (req, res) => { 
     try { 
@@ -610,8 +650,8 @@ app.get('/api/courier/stats', courierAuth, async (req, res) => {
 // 🌟 نظام الاستماع لرسائل البريد (Bankak Listener) 🌟
 // ==========================================
 function startBankakEmailListener() {
-    const email = process.env.BANK_EMAIL; 
-    const password = process.env.BANK_EMAIL_PASS;
+    const email = process.env.BANKAK_EMAIL; 
+    const password = process.env.BANKAK_PASS;
     if (!email || !password) { console.log("⚠️ نظام الأتمتة البنكية متوقف."); return; }
 
     const imap = new Imap({ user: email, password: password, host: 'imap.gmail.com', port: 993, tls: true, tlsOptions: { rejectUnauthorized: false } });
@@ -658,5 +698,5 @@ function startBankakEmailListener() {
 
 startBankakEmailListener();
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => { console.log(`🚀 BOMA Server Secure Running on port ${PORT}`); });
