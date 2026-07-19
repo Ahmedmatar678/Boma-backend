@@ -346,7 +346,7 @@ app.post('/api/wallet/reset-pin', auth, async (req, res) => { try { const { otp,
 
 app.get('/api/wallet/receiver-name/:accountNumber', auth, async (req, res) => { try { const accNum = Number(req.params.accountNumber); const receiver = await User.findOne({ accountNumber: accNum }); if (!receiver) return res.status(404).json({ message: 'غير موجود' }); if (receiver.isSuspended) return res.status(400).json({ message: 'موقوف' }); res.json({ name: receiver.fullName }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 
-// --- مسار الأتمتة المضاف حديثاً (شحن فوري برقم العملية) ---
+// --- مسار الأتمتة المُحدَّث (توجيه الشحن اليدوي عند عدم التطابق) ---
 app.post('/api/wallet/deposit-auto', auth, async (req, res) => { 
     try { 
         const user = await User.findById(req.user._id); 
@@ -378,7 +378,9 @@ app.post('/api/wallet/deposit-auto', auth, async (req, res) => {
 
             return res.status(201).json({ message: 'تم شحن المحفظة فوراً بنجاح! ⚡', newBalance: user.balance - user.frozenBalance });
         } else {
-            return res.status(400).json({ message: 'لم يتم العثور على تحويل مطابق. تأكد من رقم العملية أو انتظر وصول الإشعار البنكي.' }); 
+            // -- التعديل الجديد: في حال لم يتم العثور على الإشعار، يتم حفظ الطلب كمراجعة يدوية وإرسال رسالة نجاح خضراء للمستخدم --
+            await new FinanceRequest({ clientIdentity: user.identity, type: 'deposit', amount: amount, bankTxnId: transactionId, receipt: req.body.receipt || '', status: 'pending' }).save(); 
+            return res.status(201).json({ message: 'لم يتم العثور على الإشعار البنكي الآلي. تم تحويل الطلب لطلبات التغذية اليدوية وسنقوم بتأكيده قريباً.' }); 
         }
     } catch (e) { 
         console.error(e);
