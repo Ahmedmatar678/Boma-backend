@@ -9,6 +9,12 @@ const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 
 const app = express();
+
+// ==========================================
+// 🚀 التعديل الخاص بالسيرفر (Nginx Proxy) 🚀
+// ==========================================
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
