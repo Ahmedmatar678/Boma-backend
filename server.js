@@ -611,7 +611,6 @@ app.post('/api/vendor/products', vendorAuth, async (req, res) => {
         const user = await User.findOne({ identity: req.vendorIdentity }); 
         const finalVendorName = req.body.brandName ? req.body.brandName : (user ? user.fullName : 'تاجر شريك');
         
-        // 🌟 التعديل: تحويل النصوص المفصولة بفاصلة إلى قوائم للمتغيرات والصور 🌟
         let varArr = req.body.variations ? (Array.isArray(req.body.variations) ? req.body.variations : req.body.variations.split(',').map(s=>s.trim()).filter(s=>s)) : [];
         let galArr = req.body.gallery ? (Array.isArray(req.body.gallery) ? req.body.gallery : req.body.gallery.split(',').map(s=>s.trim()).filter(s=>s)) : [];
 
