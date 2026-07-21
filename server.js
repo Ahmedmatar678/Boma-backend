@@ -114,6 +114,45 @@ function isValidPin(pin) {
     return true;
 }
 
+// 🌟 دالة الحدود المالية (Transaction Limits) 🌟
+async function checkTransactionLimits(user, amount) {
+    if (isAdminAccount(user)) return { allowed: true };
+
+    const MIN_AMOUNT = 5000;
+    if (amount < MIN_AMOUNT) return { allowed: false, message: `الحد الأدنى للمعاملة هو ${MIN_AMOUNT.toLocaleString('en-US')} SDG` };
+
+    let isVendor = user.role === 'vendor';
+    let isVerified = user.kycStatus === 'approved';
+
+    let maxPerTx = isVendor ? 1000000 : 500000;
+    let dailyMax = isVendor ? 10000000 : 5000000;
+
+    if (!isVerified) {
+        maxPerTx = isVendor ? 200000 : 100000;
+        dailyMax = isVendor ? 200000 : 100000; 
+    }
+
+    if (amount > maxPerTx) {
+        let msg = isVerified ? `الحد الأقصى للمعاملة الواحدة هو ${maxPerTx.toLocaleString('en-US')} SDG` : `حسابك غير موثق. أقصى حد للمعاملة ${maxPerTx.toLocaleString('en-US')} SDG. يرجى التوثيق.`;
+        return { allowed: false, message: msg };
+    }
+
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const dailyTxs = await Transaction.aggregate([
+        { $match: { clientIdentity: user.identity, type: 'out', date: { $gte: startOfToday } } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]);
+    const currentDailyTotal = dailyTxs.length > 0 ? dailyTxs[0].total : 0;
+
+    if (currentDailyTotal + amount > dailyMax) {
+         let msg = isVerified ? `لقد تجاوزت الحد اليومي للمعاملات (${dailyMax.toLocaleString('en-US')} SDG)` : `حسابك غير موثق. لقد وصلت للحد الأقصى اليومي (${dailyMax.toLocaleString('en-US')} SDG). يرجى التوثيق.`;
+         return { allowed: false, message: msg };
+    }
+
+    return { allowed: true };
+}
+
 // ==========================================
 // 🌟 3. حراس الأمان (Middlewares) 🌟
 // ==========================================
@@ -464,7 +503,10 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         user.failedPinAttempts = 0; user.pinLockoutUntil = null;
         
         const amount = Number(req.body.amount); 
-        if (amount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' }); 
+        
+        // 🌟 تطبيق حدود المعاملات 🌟
+        const limitCheck = await checkTransactionLimits(user, amount);
+        if (!limitCheck.allowed) return res.status(400).json({ message: limitCheck.message });
         
         const settings = await AppSettings.findOne();
         const withdrawFeePct = settings ? (settings.withdrawFeePct || 0) : 0;
@@ -491,10 +533,14 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
     try { 
         const { receiverAccount, amount, pin } = req.body; 
         const transferAmount = Number(amount);
-        if (transferAmount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' }); 
         
         const sender = await User.findById(req.user._id); 
         if (sender.isSuspended) return res.status(400).json({ message: 'عذراً، حسابك موقوف' }); 
+        
+        // 🌟 تطبيق حدود المعاملات 🌟
+        const limitCheck = await checkTransactionLimits(sender, transferAmount);
+        if (!limitCheck.allowed) return res.status(400).json({ message: limitCheck.message });
+
         const receiver = await User.findOne({ accountNumber: Number(receiverAccount) }); 
         if (!receiver) return res.status(404).json({ message: 'المستلم غير موجود' }); 
         if (receiver.isSuspended) return res.status(400).json({ message: 'حساب المستلم موقوف' }); 
@@ -535,10 +581,13 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
         const deliveryFee = Number(req.body.deliveryFee) || 0; 
-        if (totalAmount <= 0) return res.status(400).json({ message: 'المبلغ غير صالح' });
         
         const user = await User.findById(req.user._id); 
         if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
+
+        // 🌟 تطبيق حدود المعاملات على المشتريات 🌟
+        const limitCheck = await checkTransactionLimits(user, totalAmount);
+        if (!limitCheck.allowed) return res.status(400).json({ message: limitCheck.message });
 
         if (user.pinLockoutUntil && user.pinLockoutUntil > Date.now()) {
             return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة.' });
