@@ -539,13 +539,13 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
 
         if (user.pinLockoutUntil && user.pinLockoutUntil > Date.now()) {
-            return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة. استخدم خيار (نسيت الـ PIN) للاستعادة.' });
+            return res.status(403).json({ message: 'المحفظة مقفلة لـ 3 أيام بسبب محاولات PIN خاطئة.' });
         }
         if (!(await bcrypt.compare(pin, user.pin))) {
             user.failedPinAttempts = (user.failedPinAttempts || 0) + 1;
             if (user.failedPinAttempts >= 3) { user.pinLockoutUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); }
             await user.save();
-            return res.status(400).json({ message: user.failedPinAttempts >= 3 ? 'تم قفل المحفظة لـ 3 أيام لكثرة المحاولات الخاطئة' : 'PIN خاطئ' });
+            return res.status(400).json({ message: user.failedPinAttempts >= 3 ? 'تم قفل المحفظة لـ 3 أيام' : 'PIN خاطئ' });
         }
         user.failedPinAttempts = 0; user.pinLockoutUntil = null;
         
@@ -560,23 +560,33 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
 
         await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, deliveryFee: deliveryFee, isPaid: true, deliveryOtp: deliveryOtp, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء من المتجر' }).save(); 
-        await new Notification({ clientIdentity: user.identity, title: 'تم تأكيد الطلب 🛒', message: `تم خصم ${totalAmount} SDG. رقم استلام الطلب الخاص بك للمندوب هو: ${deliveryOtp}` }).save();
+        await new Notification({ clientIdentity: user.identity, title: 'تم تأكيد الطلب 🛒', message: `تم خصم ${totalAmount} SDG. رمز الاستلام الخاص بك هو: ${deliveryOtp}` }).save();
         
         for(let item of cartItems) { 
             const product = await Product.findById(item.id);
             if(product) {
                 const finalItemPrice = item.price; 
+                const totalItemRevenue = finalItemPrice * (item.qty || 1);
                 product.stock -= (item.qty || 1); await product.save();
+                
+                // 🌟 تعديل مسار توزيع الأموال 🌟
                 if (product.vendorIdentity && product.vendorIdentity !== 'admin') {
                     const vendor = await User.findOne({ identity: product.vendorIdentity });
                     if (vendor) {
-                        const totalItemRevenue = finalItemPrice * (item.qty || 1);
-                        const commission = totalItemRevenue * 0.07; 
-                        const vendorNet = totalItemRevenue - commission;
+                        const commission = totalItemRevenue * 0.07; // 7% عمولة الإدارة
+                        const vendorNet = totalItemRevenue - commission; // 93% للتاجر
+                        
+                        // 1. إضافة الأرباح للتاجر
                         vendor.balance += vendorNet; await vendor.save();
-                        await new Transaction({ transactionId: txnId, clientIdentity: vendor.identity, type: 'in', amount: vendorNet, title: `مبيعات: ${product.arName} (تم خصم 7% لرسوم المنصة)` }).save();
+                        await new Transaction({ transactionId: txnId, clientIdentity: vendor.identity, type: 'in', amount: vendorNet, title: `مبيعات: ${product.arName} (تم خصم 7% رسوم المنصة)` }).save();
                         await new Notification({ clientIdentity: vendor.identity, title: 'مبيعات جديدة 💰', message: `تم بيع ${item.qty || 1} من ${product.arName} وتم إضافة ${vendorNet} SDG لمحفظتك.` }).save();
+                        
+                        // 2. إضافة عمولة الإدارة (7%) لحساب الإدارة (infoboma0@gmail.com)
+                        await collectSystemFee(commission, `عمولة مبيعات المتجر (7%) من منتج: ${product.arName}`, txnId);
                     }
+                } else {
+                    // 3. إذا كان المنتج مملوكاً للإدارة (admin)، يذهب المبلغ بالكامل لحساب الإدارة
+                    await collectSystemFee(totalItemRevenue, `مبيعات منتج الإدارة: ${product.arName}`, txnId);
                 }
             } 
         }
@@ -629,7 +639,14 @@ app.get('/api/courier/orders/available', courierAuth, async (req, res) => {
     try { 
         const courier = await User.findOne({ identity: req.courierIdentity });
         if (!courier.isOnline) return res.json([]); 
-        const orders = await Order.find({ status: 'pending', courierIdentity: '' }).sort({ date: -1 }); 
+        
+        // 🌟 التعديل: إخفاء الطلبات التي تحتوي على "استلام من المتجر" من الظهور للمناديب 🌟
+        const orders = await Order.find({ 
+            status: 'pending', 
+            courierIdentity: '',
+            paymentMethod: { $not: /استلام من المتجر/i } 
+        }).sort({ date: -1 }); 
+        
         res.json(orders); 
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
