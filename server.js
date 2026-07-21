@@ -18,7 +18,6 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// 🚀 التعديل الجديد: تم تغيير نطاق السماح ليطابق رابط GitHub الجديد 🚀
 app.use(cors({
     origin: ['https://boma-app678.github.io', 'http://localhost:3000'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -638,6 +637,52 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         }
         res.json({ newBalance: user.balance - user.frozenBalance }); 
     } catch (e) { res.status(500).json({ message: 'خطأ في معالجة الدفع' }); } 
+});
+
+// ==========================================
+// 🌟 مسار الدفع عند الاستلام (كاش) 🌟
+// ==========================================
+app.post('/api/checkout/cash', auth, async (req, res) => {
+    try {
+        const { totalAmount, cartItems, deliveryDetails, promoCode } = req.body;
+        const deliveryFee = Number(req.body.deliveryFee) || 0;
+
+        const user = await User.findById(req.user._id);
+        if (user.isSuspended) return res.status(400).json({ message: 'حسابك موقوف' });
+
+        const settings = await AppSettings.findOne();
+        if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، المتجر متوقف مؤقتاً' });
+
+        const finalMethod = 'الدفع عند الاستلام (كاش) || ' + (deliveryDetails || 'بدون توصيل');
+        const deliveryOtp = Math.floor(1000 + Math.random() * 9000).toString();
+
+        await new Order({
+            clientIdentity: user.identity,
+            clientName: user.fullName,
+            items: cartItems,
+            totalAmount,
+            deliveryFee: deliveryFee,
+            isPaid: false, 
+            deliveryOtp: deliveryOtp,
+            promoCode: promoCode || '',
+            paymentMethod: finalMethod
+        }).save();
+
+        await new Notification({
+            clientIdentity: user.identity,
+            title: 'تم تأكيد الطلب 🛒',
+            message: `تم استلام طلبك (الدفع كاش). رمز الاستلام الخاص بك: ${deliveryOtp}`
+        }).save();
+
+        // خفض المخزون
+        for(let item of cartItems) {
+            await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null);
+        }
+
+        res.status(201).json({ message: 'تم تأكيد الطلب بنجاح' });
+    } catch (e) {
+        res.status(500).json({ message: 'خطأ في معالجة الطلب' });
+    }
 });
 
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
