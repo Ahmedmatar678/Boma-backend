@@ -79,7 +79,6 @@ const User = mongoose.model('User', new mongoose.Schema({
 
 const BankakLog = mongoose.model('BankakLog', new mongoose.Schema({ txnId: { type: String, unique: true }, amount: Number, date: { type: Date, default: Date.now }, isUsed: { type: Boolean, default: false } }));
 
-// 🌟 التعديل: إضافة حقل vendorName في نموذج المنتجات 🌟
 const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, minPrice: { type: Number, default: 0 }, vendorIdentity: { type: String, default: 'admin' }, vendorName: { type: String, default: 'بومة' }, stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, arDesc: String, enDesc: String, variations: { type: [String], default: [] }, ratings: [{ rating: Number, clientIdentity: String }], date: { type: Date, default: Date.now } }));
 
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
@@ -572,23 +571,17 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
                 const totalItemRevenue = finalItemPrice * (item.qty || 1);
                 product.stock -= (item.qty || 1); await product.save();
                 
-                // 🌟 تعديل مسار توزيع الأموال 🌟
                 if (product.vendorIdentity && product.vendorIdentity !== 'admin') {
                     const vendor = await User.findOne({ identity: product.vendorIdentity });
                     if (vendor) {
-                        const commission = totalItemRevenue * 0.07; // 7% عمولة الإدارة
-                        const vendorNet = totalItemRevenue - commission; // 93% للتاجر
-                        
-                        // 1. إضافة الأرباح للتاجر
+                        const commission = totalItemRevenue * 0.07; 
+                        const vendorNet = totalItemRevenue - commission; 
                         vendor.balance += vendorNet; await vendor.save();
                         await new Transaction({ transactionId: txnId, clientIdentity: vendor.identity, type: 'in', amount: vendorNet, title: `مبيعات: ${product.arName} (تم خصم 7% رسوم المنصة)` }).save();
                         await new Notification({ clientIdentity: vendor.identity, title: 'مبيعات جديدة 💰', message: `تم بيع ${item.qty || 1} من ${product.arName} وتم إضافة ${vendorNet} SDG لمحفظتك.` }).save();
-                        
-                        // 2. إضافة عمولة الإدارة (7%) لحساب الإدارة (infoboma0@gmail.com)
                         await collectSystemFee(commission, `عمولة مبيعات المتجر (7%) من منتج: ${product.arName}`, txnId);
                     }
                 } else {
-                    // 3. إذا كان المنتج مملوكاً للإدارة (admin)، يذهب المبلغ بالكامل لحساب الإدارة
                     await collectSystemFee(totalItemRevenue, `مبيعات منتج الإدارة: ${product.arName}`, txnId);
                 }
             } 
@@ -615,9 +608,10 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const t
 // ==========================================
 app.post('/api/vendor/products', vendorAuth, async (req, res) => { 
     try { 
-        // 🌟 التعديل: إرفاق اسم التاجر آلياً 🌟
         const user = await User.findOne({ identity: req.vendorIdentity }); 
-        const productData = { ...req.body, vendorIdentity: req.vendorIdentity, vendorName: user ? user.fullName : 'تاجر شريك' }; 
+        // 🌟 التعديل: إعطاء الأولوية لاسم العلامة التجارية المرسل من التطبيق، وإلا نستخدم اسم التاجر 🌟
+        const finalVendorName = req.body.brandName ? req.body.brandName : (user ? user.fullName : 'تاجر شريك');
+        const productData = { ...req.body, vendorIdentity: req.vendorIdentity, vendorName: finalVendorName }; 
         await new Product(productData).save(); 
         res.status(201).json({ message: 'تم إضافة المنتج بنجاح' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } 
@@ -651,7 +645,6 @@ app.get('/api/courier/orders/available', courierAuth, async (req, res) => {
         const courier = await User.findOne({ identity: req.courierIdentity });
         if (!courier.isOnline) return res.json([]); 
         
-        // 🌟 التعديل: إخفاء الطلبات التي تحتوي على "استلام من المتجر" من الظهور للمناديب 🌟
         const orders = await Order.find({ 
             status: 'pending', 
             courierIdentity: '',
