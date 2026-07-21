@@ -609,9 +609,20 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const t
 app.post('/api/vendor/products', vendorAuth, async (req, res) => { 
     try { 
         const user = await User.findOne({ identity: req.vendorIdentity }); 
-        // 🌟 التعديل: إعطاء الأولوية لاسم العلامة التجارية المرسل من التطبيق، وإلا نستخدم اسم التاجر 🌟
         const finalVendorName = req.body.brandName ? req.body.brandName : (user ? user.fullName : 'تاجر شريك');
-        const productData = { ...req.body, vendorIdentity: req.vendorIdentity, vendorName: finalVendorName }; 
+        
+        // 🌟 التعديل: تحويل النصوص المفصولة بفاصلة إلى قوائم للمتغيرات والصور 🌟
+        let varArr = req.body.variations ? (Array.isArray(req.body.variations) ? req.body.variations : req.body.variations.split(',').map(s=>s.trim()).filter(s=>s)) : [];
+        let galArr = req.body.gallery ? (Array.isArray(req.body.gallery) ? req.body.gallery : req.body.gallery.split(',').map(s=>s.trim()).filter(s=>s)) : [];
+
+        const productData = { 
+            ...req.body, 
+            vendorIdentity: req.vendorIdentity, 
+            vendorName: finalVendorName,
+            variations: varArr,
+            gallery: galArr
+        }; 
+        
         await new Product(productData).save(); 
         res.status(201).json({ message: 'تم إضافة المنتج بنجاح' }); 
     } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } 
