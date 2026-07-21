@@ -78,7 +78,10 @@ const User = mongoose.model('User', new mongoose.Schema({
 }));
 
 const BankakLog = mongoose.model('BankakLog', new mongoose.Schema({ txnId: { type: String, unique: true }, amount: Number, date: { type: Date, default: Date.now }, isUsed: { type: Boolean, default: false } }));
-const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, minPrice: { type: Number, default: 0 }, vendorIdentity: { type: String, default: 'admin' }, stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, arDesc: String, enDesc: String, variations: { type: [String], default: [] }, ratings: [{ rating: Number, clientIdentity: String }], date: { type: Date, default: Date.now } }));
+
+// 🌟 التعديل: إضافة حقل vendorName في نموذج المنتجات 🌟
+const Product = mongoose.model('Product', new mongoose.Schema({ catIdx: Number, categoryId: String, arName: String, enName: String, price: Number, minPrice: { type: Number, default: 0 }, vendorIdentity: { type: String, default: 'admin' }, vendorName: { type: String, default: 'بومة' }, stock: { type: Number, default: 0 }, img: String, gallery: { type: [String], default: [] }, arDesc: String, enDesc: String, variations: { type: [String], default: [] }, ratings: [{ rating: Number, clientIdentity: String }], date: { type: Date, default: Date.now } }));
+
 const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: String, price: Number })); 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
@@ -610,7 +613,15 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => { try { const t
 // ==========================================
 // 🌟 9. لوحة التاجر (Vendor Panel) 🌟
 // ==========================================
-app.post('/api/vendor/products', vendorAuth, async (req, res) => { try { const productData = { ...req.body, vendorIdentity: req.vendorIdentity }; await new Product(productData).save(); res.status(201).json({ message: 'تم إضافة المنتج بنجاح' }); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
+app.post('/api/vendor/products', vendorAuth, async (req, res) => { 
+    try { 
+        // 🌟 التعديل: إرفاق اسم التاجر آلياً 🌟
+        const user = await User.findOne({ identity: req.vendorIdentity }); 
+        const productData = { ...req.body, vendorIdentity: req.vendorIdentity, vendorName: user ? user.fullName : 'تاجر شريك' }; 
+        await new Product(productData).save(); 
+        res.status(201).json({ message: 'تم إضافة المنتج بنجاح' }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } 
+});
 app.get('/api/vendor/products', vendorAuth, async (req, res) => { try { const products = await Product.find({ vendorIdentity: req.vendorIdentity }).sort({ date: -1 }); res.json(products); } catch (e) { res.status(500).json({ message: 'خطأ داخلي' }); } });
 app.put('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح' }); await Product.findByIdAndUpdate(req.params.id, req.body); res.json({ message: 'تم التعديل' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/vendor/products/:id', vendorAuth, async (req, res) => { try { const product = await Product.findOne({ _id: req.params.id, vendorIdentity: req.vendorIdentity }); if (!product) return res.status(403).json({ message: 'غير مصرح' }); await Product.findByIdAndDelete(req.params.id); res.json({ message: 'تم الحذف' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
