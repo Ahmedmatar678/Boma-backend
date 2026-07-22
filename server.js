@@ -85,7 +85,6 @@ const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 
-// 🌟 تعديل نموذج Order لدعم أسباب الإلغاء 🌟
 const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, courierIdentity: { type: String, default: '' }, deliveryOtp: { type: String, default: '' }, deliveryFee: { type: Number, default: 0 }, isPaid: { type: Boolean, default: false }, status: { type: String, default: 'pending' }, cancellationReason: { type: String, default: '' }, date: { type: Date, default: Date.now } }));
 
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
@@ -100,7 +99,6 @@ const MASTER_OTP = "1111";
 function isAdminAccount(user) { if (!user || !user.identity) return false; const ident = String(user.identity).toLowerCase().trim(); return ident === 'infoboma0@gmail.com' || ident === 'ahmedwadmatar1996@gmail.com'; }
 async function collectSystemFee(amount, title, txnId) { if (amount <= 0) return; const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' }); if (adminAccount) { adminAccount.balance += amount; await adminAccount.save(); await new Transaction({ transactionId: txnId, clientIdentity: adminAccount.identity, type: 'in', amount: amount, title: title }).save(); } }
 
-// 🌟 دالة إشعار المناديب بالطلبات الجديدة 🌟
 async function notifyOnlineCouriers(orderId) {
     try {
         const couriers = await User.find({ role: 'courier', isOnline: true });
@@ -130,7 +128,6 @@ function isValidPin(pin) {
     return true;
 }
 
-// 🌟 دالة الحدود المالية (Transaction Limits) 🌟
 async function checkTransactionLimits(user, amount) {
     if (isAdminAccount(user)) return { allowed: true };
 
@@ -416,7 +413,6 @@ app.get('/api/delivery-zones', async (req, res) => { try { res.json(await Delive
 app.post('/api/admin/delivery-zones', adminAuth, async (req, res) => { try { await new DeliveryZone({ name: req.body.name, price: Number(req.body.price) }).save(); res.status(201).json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 app.delete('/api/admin/delivery-zones/:id', adminAuth, async (req, res) => { try { await DeliveryZone.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({message:'خطأ'}); } });
 
-// 🌟 تعديل مسار الطلبات لإرسال إشعارات المناديب 🌟
 app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Order.find().sort({date:-1})); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -429,7 +425,7 @@ app.post('/api/orders', async (req, res) => {
         const orderData = { ...req.body, items: cartItems }; 
         const newOrder = await new Order(orderData).save(); 
         
-        notifyOnlineCouriers(newOrder._id); // 🔔 تنبيه المناديب
+        notifyOnlineCouriers(newOrder._id); 
         
         for(let item of cartItems) { 
             await Product.findByIdAndUpdate(item.id, { $inc: { stock: -(item.qty || 1) } }).catch(()=>null); 
@@ -610,7 +606,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 تعديل مسار إتمام الشراء لإرسال إشعارات المناديب 🌟
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
@@ -644,7 +639,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
 
         const newOrder = await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, deliveryFee: deliveryFee, isPaid: true, deliveryOtp: deliveryOtp, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
         
-        notifyOnlineCouriers(newOrder._id); // 🔔 تنبيه المناديب
+        notifyOnlineCouriers(newOrder._id); 
         
         await new Transaction({ transactionId: txnId, clientIdentity: user.identity, type: 'out', amount: totalAmount, title: 'شراء من المتجر' }).save(); 
         await new Notification({ clientIdentity: user.identity, title: 'تم تأكيد الطلب 🛒', message: `تم خصم ${totalAmount} SDG. رمز الاستلام الخاص بك هو: ${deliveryOtp}` }).save();
@@ -675,7 +670,6 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ في معالجة الدفع' }); } 
 });
 
-// 🌟 تعديل الدفع عند الاستلام لإرسال إشعارات المناديب 🌟
 app.post('/api/checkout/cash', auth, async (req, res) => {
     try {
         const { totalAmount, cartItems, deliveryDetails, promoCode } = req.body;
@@ -702,7 +696,7 @@ app.post('/api/checkout/cash', auth, async (req, res) => {
             paymentMethod: finalMethod
         }).save();
 
-        notifyOnlineCouriers(newOrder._id); // 🔔 تنبيه المناديب
+        notifyOnlineCouriers(newOrder._id);
 
         await new Notification({
             clientIdentity: user.identity,
@@ -802,6 +796,17 @@ app.get('/api/courier/orders/my', courierAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
+// 🌟 المسار الجديد: جلب سجل طلبات المندوب (المسلمة والمرتجعة) 🌟
+app.get('/api/courier/orders/history', courierAuth, async (req, res) => { 
+    try { 
+        const orders = await Order.find({ 
+            courierIdentity: req.courierIdentity, 
+            status: { $in: ['delivered', 'returned'] } 
+        }).sort({ date: -1 }).limit(50); // جلب آخر 50 طلب للحفاظ على سرعة التطبيق
+        res.json(orders); 
+    } catch (e) { res.status(500).json({ message: 'خطأ في جلب السجل' }); } 
+});
+
 app.put('/api/courier/orders/:id/accept', courierAuth, async (req, res) => { 
     try { 
         const courier = await User.findOne({ identity: req.courierIdentity });
@@ -853,7 +858,6 @@ app.put('/api/courier/orders/:id/deliver', courierAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 المسار الجديد: إرجاع الطلب يدوياً للمراجعة 🌟
 app.put('/api/courier/orders/:id/return', courierAuth, async (req, res) => { 
     try { 
         const { reason } = req.body; 
@@ -862,19 +866,16 @@ app.put('/api/courier/orders/:id/return', courierAuth, async (req, res) => {
             return res.status(400).json({ message: 'الطلب غير صالح أو لم يعد بحوزتك' }); 
         }
 
-        // تغيير الحالة إلى مرتجع (تحت المراجعة الإدارية)
         order.status = 'returned'; 
         order.cancellationReason = reason || 'غير محدد'; 
         await order.save(); 
 
-        // إشعار العميل
         await new Notification({ 
             clientIdentity: order.clientIdentity, 
             title: 'تحديث حالة الطلب ⚠️', 
             message: `عذراً، تعذر تسليم طلبك. السبب: ${order.cancellationReason}. جاري المراجعة من الإدارة.` 
         }).save(); 
 
-        // إشعار الإدارة
         const adminAccount = await User.findOne({ identity: 'infoboma0@gmail.com' });
         if (adminAccount) {
             await new Notification({ 
