@@ -66,6 +66,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     role: { type: String, enum: ['user', 'vendor', 'courier'], default: 'user' }, 
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
+    nationalId: { type: String, default: '' }, // 🌟 إضافة حقل الرقم الوطني/الجواز 🌟
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     debt: { type: Number, default: 0 }, 
     isOnline: { type: Boolean, default: true }, targetBonusAchievedDate: { type: String, default: '' },
@@ -180,11 +181,18 @@ const courierAuth = async (req, res, next) => { await auth(req, res, async () =>
 app.post('/api/auth/signup', async (req, res) => { 
     try { 
         const { fullName, identity, password, pin, termsAccepted } = req.body; 
+        
+        // 🌟 التعديل الأول: التحقق من أن الاسم رباعي 🌟
+        const nameParts = fullName.trim().split(/\s+/);
+        if (nameParts.length < 4) {
+            return res.status(400).json({ message: 'الرجاء إدخال اسمك الرباعي الكامل (4 كلمات على الأقل).' });
+        }
+
         if (!isValidPassword(password)) return res.status(400).json({ message: 'كلمة المرور ضعيفة! يجب أن تتكون من 8 خانات وتحتوي على أحرف وأرقام معاً.' });
         if (!isValidPin(pin)) return res.status(400).json({ message: 'رمز الـ PIN غير آمن! يجب ألا يكون متطابقاً أو متسلسلاً.' });
 
         const existingUser = await User.findOne({ identity }); 
-        if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً' }); 
+        if (existingUser && existingUser.isActive) return res.status(400).json({ message: 'مسجل مسبقاً بهذا الحساب (هاتف/ايميل)' }); 
         
         const hashedPassword = await bcrypt.hash(password, 10); 
         const hashedPin = await bcrypt.hash(pin, 10); 
@@ -202,7 +210,7 @@ app.post('/api/auth/signup', async (req, res) => {
         } else {
             return res.status(201).json({ identity, isEmail, fallbackOtp: otp, message: 'تم إرسال الرمز' }); 
         }
-    } catch (e) { return res.status(500).json({ message: 'خطأ' }); } 
+    } catch (e) { return res.status(500).json({ message: 'خطأ داخلي في الخادم' }); } 
 });
 
 app.post('/api/auth/verify-otp', async (req, res) => { try { const { identity, otp, purpose, deviceId } = req.body; const tempData = temporarySignups.get(identity); if (tempData) { if (String(otp) === String(tempData.otp) || String(otp) === MASTER_OTP) { try { const WELCOME_BONUS = 5000; const newUser = new User({ fullName: tempData.fullName, identity: tempData.identity, password: tempData.password, pin: tempData.pin, termsAccepted: tempData.termsAccepted, accountNumber: tempData.accountNumber, balance: WELCOME_BONUS, isActive: true, trustedDevice: deviceId }); await newUser.save(); const txnId = 'BOMA-' + Math.floor(10000000 + Math.random() * 90000000); await new Transaction({ transactionId: txnId, clientIdentity: newUser.identity, type: 'in', amount: WELCOME_BONUS, title: 'هدية ترحيبية 🎉' }).save(); temporarySignups.delete(identity); const token = jwt.sign({ _id: newUser._id, accountNumber: newUser.accountNumber, tokenVersion: newUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); return res.json({ message: 'تم التفعيل', token, user: { name: newUser.fullName, identity: newUser.identity, accountNumber: newUser.accountNumber, balance: WELCOME_BONUS, kycStatus: 'pending', role: newUser.role, wishlist: newUser.wishlist || [] } }); } catch (saveErr) { return res.status(400).json({ message: 'مسجل مسبقاً' }); } } else return res.status(400).json({ message: 'رمز خاطئ' }); } const user = await User.findOne({ identity }); if (!user) return res.status(404).json({ message: 'غير موجود' }); if (String(otp) === String(user.otp) || String(otp) === MASTER_OTP) { if (purpose === 'forgot') return res.json({ message: 'رمز صحيح' }); const updatedUser = await User.findOneAndUpdate({ identity }, { $set: { trustedDevice: deviceId || '', otp: null }, $inc: { tokenVersion: 1 } }, { new: true }); const token = jwt.sign({ _id: updatedUser._id, accountNumber: updatedUser.accountNumber, tokenVersion: updatedUser.tokenVersion }, JWT_SECRET, { expiresIn: '30d' }); return res.json({ token, user: { name: updatedUser.fullName, identity: updatedUser.identity, accountNumber: updatedUser.accountNumber, balance: (updatedUser.balance || 0) - (updatedUser.frozenBalance || 0), kycStatus: updatedUser.kycStatus, role: updatedUser.role, wishlist: updatedUser.wishlist || [] } }); } return res.status(400).json({ message: 'رمز خاطئ' }); } catch (e) { return res.status(500).json({ message: `خطأ` }); } });
@@ -714,7 +722,36 @@ app.post('/api/checkout/cash', auth, async (req, res) => {
     }
 });
 
-app.post('/api/wallet/submit-kyc', auth, async (req, res) => { try { const user = await User.findById(req.user._id); user.kycDocs = { docType: req.body.docType, docImage: req.body.docImage, selfieImage: req.body.selfieImage }; user.kycStatus = 'pending'; await user.save(); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
+// 🌟 التعديل الثاني: التحقق من عدم تكرار الرقم الوطني/الجواز 🌟
+app.post('/api/wallet/submit-kyc', auth, async (req, res) => { 
+    try { 
+        const { docType, docImage, selfieImage, nationalId } = req.body;
+        
+        if (!nationalId || nationalId.trim() === '') {
+            return res.status(400).json({ message: 'الرجاء إدخال الرقم الوطني أو رقم الجواز لتأكيد الهوية.' });
+        }
+
+        // فحص إذا كان الرقم الوطني مسجل في حساب آخر ليس مرفوضاً
+        const existingKyc = await User.findOne({ 
+            nationalId: nationalId, 
+            _id: { $ne: req.user._id },
+            kycStatus: { $ne: 'rejected' } 
+        });
+
+        if (existingKyc) {
+            return res.status(400).json({ message: 'هذا الرقم (الوطني/الجواز) مستخدم بالفعل في حساب آخر.' });
+        }
+
+        const user = await User.findById(req.user._id); 
+        user.kycDocs = { docType, docImage, selfieImage }; 
+        user.nationalId = nationalId; // حفظ الرقم الوطني
+        user.kycStatus = 'pending'; 
+        await user.save(); 
+        
+        res.json({ message: 'تم استلام بيانات التوثيق بنجاح' }); 
+    } catch (e) { res.status(500).json({ message: 'خطأ في معالجة التوثيق' }); } 
+});
+
 app.get('/api/notifications', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Notification.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.put('/api/notifications/read', auth, async (req, res) => { try { const user = await User.findById(req.user._id); await Notification.updateMany({ clientIdentity: user.identity, isRead: false }, { isRead: true }); res.json({ message: 'تم' }); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
 app.get('/api/wallet/transactions', auth, async (req, res) => { try { const user = await User.findById(req.user._id); res.json(await Transaction.find({ clientIdentity: user.identity }).sort({ date: -1 })); } catch (e) { res.status(500).json({ message: 'خطأ' }); } });
@@ -796,13 +833,12 @@ app.get('/api/courier/orders/my', courierAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
-// 🌟 المسار الجديد: جلب سجل طلبات المندوب (المسلمة والمرتجعة) 🌟
 app.get('/api/courier/orders/history', courierAuth, async (req, res) => { 
     try { 
         const orders = await Order.find({ 
             courierIdentity: req.courierIdentity, 
             status: { $in: ['delivered', 'returned'] } 
-        }).sort({ date: -1 }).limit(50); // جلب آخر 50 طلب للحفاظ على سرعة التطبيق
+        }).sort({ date: -1 }).limit(50);
         res.json(orders); 
     } catch (e) { res.status(500).json({ message: 'خطأ في جلب السجل' }); } 
 });
