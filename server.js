@@ -66,7 +66,7 @@ const User = mongoose.model('User', new mongoose.Schema({
     fullName: String, identity: { type: String, unique: true }, password: String, pin: String,
     role: { type: String, enum: ['user', 'vendor', 'courier'], default: 'user' }, 
     termsAccepted: Boolean, kycStatus: { type: String, default: 'pending' }, kycDocs: { type: Object, default: {} },
-    nationalId: { type: String, default: '' }, // 🌟 إضافة حقل الرقم الوطني/الجواز 🌟
+    nationalId: { type: String, default: '' },
     accountNumber: { type: Number, unique: true }, balance: { type: Number, default: 0 },
     debt: { type: Number, default: 0 }, 
     isOnline: { type: Boolean, default: true }, targetBonusAchievedDate: { type: String, default: '' },
@@ -86,7 +86,24 @@ const DeliveryZone = mongoose.model('DeliveryZone', new mongoose.Schema({ name: 
 const ServiceRequest = mongoose.model('ServiceRequest', new mongoose.Schema({ serviceName: String, projectName: String, description: String, clientIdentity: String, clientName: String, date: { type: Date, default: Date.now } }));
 const Banner = mongoose.model('Banner', new mongoose.Schema({ placement: String, arTitle: String, enTitle: String, arDesc: String, enDesc: String, imgUrl: String, date: { type: Date, default: Date.now } }));
 
-const Order = mongoose.model('Order', new mongoose.Schema({ clientIdentity: String, clientName: String, items: Array, totalAmount: Number, promoCode: { type: String, default: '' }, paymentMethod: String, courierIdentity: { type: String, default: '' }, deliveryOtp: { type: String, default: '' }, deliveryFee: { type: Number, default: 0 }, isPaid: { type: Boolean, default: false }, status: { type: String, default: 'pending' }, cancellationReason: { type: String, default: '' }, date: { type: Date, default: Date.now } }));
+// 🌟 التعديل: إضافة حقول الهاتف ومكان الاستلام للمندوب 🌟
+const Order = mongoose.model('Order', new mongoose.Schema({ 
+    clientIdentity: String, 
+    clientName: String, 
+    clientPhone: { type: String, default: '' }, 
+    pickupLocation: { type: String, default: 'مستودع بومة المركزي' },
+    items: Array, 
+    totalAmount: Number, 
+    promoCode: { type: String, default: '' }, 
+    paymentMethod: String, 
+    courierIdentity: { type: String, default: '' }, 
+    deliveryOtp: { type: String, default: '' }, 
+    deliveryFee: { type: Number, default: 0 }, 
+    isPaid: { type: Boolean, default: false }, 
+    status: { type: String, default: 'pending' }, 
+    cancellationReason: { type: String, default: '' }, 
+    date: { type: Date, default: Date.now } 
+}));
 
 const Notification = mongoose.model('Notification', new mongoose.Schema({ clientIdentity: String, title: String, message: String, isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }, type: { type: String, default: 'personal' } }));
 const Transaction = mongoose.model('Transaction', new mongoose.Schema({ transactionId: String, clientIdentity: String, type: String, amount: Number, title: String, date: { type: Date, default: Date.now } }));
@@ -182,7 +199,6 @@ app.post('/api/auth/signup', async (req, res) => {
     try { 
         const { fullName, identity, password, pin, termsAccepted } = req.body; 
         
-        // 🌟 التعديل الأول: التحقق من أن الاسم رباعي 🌟
         const nameParts = fullName.trim().split(/\s+/);
         if (nameParts.length < 4) {
             return res.status(400).json({ message: 'الرجاء إدخال اسمك الرباعي الكامل (4 كلمات على الأقل).' });
@@ -425,14 +441,23 @@ app.get('/api/orders', adminAuth, async (req, res) => { try { res.json(await Ord
 app.put('/api/orders/:id/status', adminAuth, async (req, res) => { try { await Order.findByIdAndUpdate(req.params.id, { status: req.body.status }); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 app.delete('/api/orders/:id', adminAuth, async (req, res) => { try { await Order.findByIdAndDelete(req.params.id); res.json({ message: 'تم' }); } catch(e) { res.status(500).json({ message: 'خطأ' }); } });
 
+// 🌟 تعديل: استخراج رقم الهاتف ومكان الاستلام للطلبات 🌟
 app.post('/api/orders', async (req, res) => { 
     try { 
         const settings = await AppSettings.findOne(); 
         if(settings && !settings.isStoreEnabled) return res.status(400).json({ message: 'عذراً، المتجر متوقف مؤقتاً' }); 
-        const cartItems = req.body.cartItems || req.body.items || []; 
-        const orderData = { ...req.body, items: cartItems }; 
-        const newOrder = await new Order(orderData).save(); 
         
+        const cartItems = req.body.cartItems || req.body.items || []; 
+        const phone = req.body.deliveryDetails ? req.body.deliveryDetails.split('|')[0].trim() : '';
+
+        const orderData = { 
+            ...req.body, 
+            items: cartItems,
+            clientPhone: phone,
+            pickupLocation: 'مستودع بومة المركزي 🏪'
+        }; 
+        
+        const newOrder = await new Order(orderData).save(); 
         notifyOnlineCouriers(newOrder._id); 
         
         for(let item of cartItems) { 
@@ -541,7 +566,6 @@ app.post('/api/wallet/withdraw', auth, async (req, res) => {
         
         const amount = Number(req.body.amount); 
         
-        // 🌟 تطبيق حدود المعاملات 🌟
         const limitCheck = await checkTransactionLimits(user, amount);
         if (!limitCheck.allowed) return res.status(400).json({ message: limitCheck.message });
         
@@ -574,7 +598,6 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
         const sender = await User.findById(req.user._id); 
         if (sender.isSuspended) return res.status(400).json({ message: 'عذراً، حسابك موقوف' }); 
         
-        // 🌟 تطبيق حدود المعاملات 🌟
         const limitCheck = await checkTransactionLimits(sender, transferAmount);
         if (!limitCheck.allowed) return res.status(400).json({ message: limitCheck.message });
 
@@ -614,6 +637,7 @@ app.post('/api/wallet/transfer', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ' }); } 
 });
 
+// 🌟 التعديل: استخراج رقم الهاتف ومكان الاستلام للطلبات 🌟
 app.post('/api/wallet/checkout', auth, async (req, res) => { 
     try { 
         const { totalAmount, pin, cartItems, deliveryDetails, promoCode } = req.body; 
@@ -644,8 +668,21 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
         const txnId = 'TXN' + Math.floor(10000000 + Math.random() * 90000000);
         const finalMethod = 'BOMA Wallet || ' + (deliveryDetails || 'بدون توصيل');
         const deliveryOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        const phone = deliveryDetails ? deliveryDetails.split('|')[0].trim() : '';
 
-        const newOrder = await new Order({ clientIdentity: user.identity, clientName: user.fullName, items: cartItems, totalAmount, deliveryFee: deliveryFee, isPaid: true, deliveryOtp: deliveryOtp, promoCode: promoCode || '', paymentMethod: finalMethod }).save(); 
+        const newOrder = await new Order({ 
+            clientIdentity: user.identity, 
+            clientName: user.fullName, 
+            clientPhone: phone,
+            pickupLocation: 'مستودع بومة المركزي 🏪',
+            items: cartItems, 
+            totalAmount, 
+            deliveryFee: deliveryFee, 
+            isPaid: true, 
+            deliveryOtp: deliveryOtp, 
+            promoCode: promoCode || '', 
+            paymentMethod: finalMethod 
+        }).save(); 
         
         notifyOnlineCouriers(newOrder._id); 
         
@@ -678,6 +715,7 @@ app.post('/api/wallet/checkout', auth, async (req, res) => {
     } catch (e) { res.status(500).json({ message: 'خطأ في معالجة الدفع' }); } 
 });
 
+// 🌟 التعديل: استخراج رقم الهاتف ومكان الاستلام للطلبات 🌟
 app.post('/api/checkout/cash', auth, async (req, res) => {
     try {
         const { totalAmount, cartItems, deliveryDetails, promoCode } = req.body;
@@ -691,10 +729,13 @@ app.post('/api/checkout/cash', auth, async (req, res) => {
 
         const finalMethod = 'الدفع عند الاستلام (كاش) || ' + (deliveryDetails || 'بدون توصيل');
         const deliveryOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        const phone = deliveryDetails ? deliveryDetails.split('|')[0].trim() : '';
 
         const newOrder = await new Order({
             clientIdentity: user.identity,
             clientName: user.fullName,
+            clientPhone: phone,
+            pickupLocation: 'مستودع بومة المركزي 🏪',
             items: cartItems,
             totalAmount,
             deliveryFee: deliveryFee,
@@ -722,7 +763,6 @@ app.post('/api/checkout/cash', auth, async (req, res) => {
     }
 });
 
-// 🌟 التعديل الثاني: التحقق من عدم تكرار الرقم الوطني/الجواز 🌟
 app.post('/api/wallet/submit-kyc', auth, async (req, res) => { 
     try { 
         const { docType, docImage, selfieImage, nationalId } = req.body;
@@ -731,7 +771,6 @@ app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
             return res.status(400).json({ message: 'الرجاء إدخال الرقم الوطني أو رقم الجواز لتأكيد الهوية.' });
         }
 
-        // فحص إذا كان الرقم الوطني مسجل في حساب آخر ليس مرفوضاً
         const existingKyc = await User.findOne({ 
             nationalId: nationalId, 
             _id: { $ne: req.user._id },
@@ -744,7 +783,7 @@ app.post('/api/wallet/submit-kyc', auth, async (req, res) => {
 
         const user = await User.findById(req.user._id); 
         user.kycDocs = { docType, docImage, selfieImage }; 
-        user.nationalId = nationalId; // حفظ الرقم الوطني
+        user.nationalId = nationalId; 
         user.kycStatus = 'pending'; 
         await user.save(); 
         
